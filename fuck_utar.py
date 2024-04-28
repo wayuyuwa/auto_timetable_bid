@@ -40,9 +40,13 @@ def tryLoginWithCookies(driver: webdriver):
             driver.add_cookie(cookie)
     # Go to the register url to see if login successful (The cookies may expired)
     driver.get(REGISTER_URL)
-    expired = bool(driver.find_elements(By.XPATH, "//*[contains(text(), 'Session Expired')]"))
-    if expired:
-        return False
+    try:
+        expired = bool(driver.find_elements(
+            By.XPATH, "//*[contains(text(), 'Session Expired')]"
+        ))
+    finally:
+        if expired:
+            return False
     
     return True
         
@@ -50,6 +54,13 @@ def login(driver: webdriver):
     # Say my appreciation to UTAR
     print("Fuck you UTAR!")
     print("Trying to login...")
+
+    if not STUDENT_ID or not PASSWORD:
+        raise Exception(
+            "Student ID or password is not set! " \
+            "Please refer to the guide in " \
+            "https://github.com/Chin-Wai-Yee/auto_timetable_bid to set it"
+        )
 
     # Go to login page
     driver.get(LOGIN_URL)
@@ -73,16 +84,20 @@ def login(driver: webdriver):
         return False
 
     # Solve kaptcha
-    kaptcha_img = driver.find_element(
-        # This XPATH find:
-        # XPATH                    MEANING
-        # //                       the element shall locate at anywhere
-        # input                    the element shall be an input
-        # [@name='kaptchafield']   the name attribute shall have the name "kaptchafield"
-        # /..                      go to its parent
-        # /img[i]                  and get the first img child
-        By.XPATH, "//input[@name='kaptchafield']/../img[1]"
-    ).screenshot_as_png
+    try:
+        kaptcha_img = driver.find_element(
+            # This XPATH find:
+            # XPATH                    MEANING
+            # //                       the element shall locate at anywhere
+            # input                    the element shall be an input
+            # [@name='kaptchafield']   the name attribute shall have the name "kaptchafield"
+            # /..                      go to its parent
+            # /img[i]                  and get the first img child
+            By.XPATH, "//input[@name='kaptchafield']/../img[1]"
+        ).screenshot_as_png
+    except NoSuchElementException:
+        print("Kaptcha not found")
+        return False
 
     kaptcha_pass = fuck_kaptcha.getKaptchaText(kaptcha_img)
 
@@ -98,7 +113,14 @@ def login(driver: webdriver):
             EC.presence_of_element_located((By.XPATH, "//span[contains(text(), 'Log Out')]"))
         )
     except TimeoutException:
-        return False
+        try:
+            alert = driver.find_element(By.CLASS_NAME, "red").text
+        finally:
+            if "Invalid Student ID or Password" in alert:
+                raise Exception(
+                    "Your student ID or password is invalid"
+                )
+            return False
     
     return True
 
