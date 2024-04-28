@@ -1,0 +1,2 @@
+STUDENT_ID = ""
+PASSWORD = ""
