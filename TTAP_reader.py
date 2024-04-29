@@ -2,7 +2,7 @@ import re
 
 def readCourse(course: list[str]):
     # Read course code
-    course_code = course[0]
+    course_code = course[0].strip()
 
     slots = {}
     # Read the slots
@@ -34,10 +34,10 @@ def readTimetable(filename: str):
 if __name__ == "__main__":
     courses = readTimetable("MyTimetable.txt")
 
-    print("=====================================")
+    print("=" * 40)
     for course in courses:
         for key, value in course.items():
             print(f"Course code: {key}")
             for key2, value2 in value.items():
                 print(f"Slot type: {key2}, Slot nums: {value2}")
-            print("=====================================")
+            print("=" * 40)
