@@ -28,31 +28,6 @@ REGISTER_COURSE_URL = URL + "/registration/registerUnitSurvey.jsp"
 
 def sessionExpired(driver: webdriver):
     return bool(driver.find_elements(By.XPATH, "//*[contains(text(), 'Session Expired')]"))
-
-# The function try to login the system if cookies are stored before
-def tryLoginWithCookies(driver: webdriver):
-
-    # If cookies.txt does not exist in current directory
-    if not os.path.isfile("cookies.txt"):
-        # Just back to the login page to login again
-        return False
-
-    # Open the file and read out all the cookies
-    with open("cookies.txt", "r") as file:
-        cookies = json.load(file)
-        # Go to an 404 page to ensure cookies are set for the same site
-        driver.get(URL+"/fuckyouutar")
-        driver.delete_all_cookies()
-        # Set cookies!
-        for cookie in cookies:
-            driver.add_cookie(cookie)
-    # Go to the register url to see if login successful (The cookies may expired)
-    driver.get(REGISTER_URL)
-    expired = sessionExpired(driver)
-    if expired:
-        return False
-    
-    return True
         
 def login(driver: webdriver):
     # Say my appreciation to UTAR
@@ -292,6 +267,7 @@ def registerCourses(driver: webdriver, courses: list[Course.Course]):
 
             print("Biding course...")
             if regsiterCourse(driver, course):
+                print("")
                 loop = False
 
     print("Done!")
@@ -303,12 +279,9 @@ if __name__ == "__main__":
     
     drivers = webdriver.Chrome()
 
-    logged_in = tryLoginWithCookies(drivers)
-
-    if not logged_in:
-        while(not login(drivers)):
-            print("Oh shit! Failed to login! UTAR sucks!")
-            print("No worry lets try again!")
+    while(not login(drivers)):
+        print("Oh shit! Failed to login! UTAR sucks!")
+        print("No worry lets try again!")
 
     print("Storing cookies...yum yum yum")
     storeCookies(drivers)
