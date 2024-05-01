@@ -59,6 +59,13 @@ def login(driver: webdriver):
     print("Fuck you UTAR!")
     print("Trying to login...")
 
+    if not STUDENT_ID or not PASSWORD:
+        raise Exception(
+            "Student ID or password is not set! " \
+            "Please refer to the guide in " \
+            "https://github.com/Chin-Wai-Yee/auto_timetable_bid to set it"
+        )
+
     # Go to login page
     driver.get(LOGIN_URL)
 
@@ -81,16 +88,20 @@ def login(driver: webdriver):
         return False
 
     # Solve kaptcha
-    kaptcha_img = driver.find_element(
-        # This XPATH find:
-        # XPATH                    MEANING
-        # //                       the element shall locate at anywhere
-        # input                    the element shall be an input
-        # [@name='kaptchafield']   the name attribute shall have the name "kaptchafield"
-        # /..                      go to its parent
-        # /img[i]                  and get the first img child
-        By.XPATH, "//input[@name='kaptchafield']/../img[1]"
-    ).screenshot_as_png
+    try:
+        kaptcha_img = driver.find_element(
+            # This XPATH find:
+            # XPATH                    MEANING
+            # //                       the element shall locate at anywhere
+            # input                    the element shall be an input
+            # [@name='kaptchafield']   the name attribute shall have the name "kaptchafield"
+            # /..                      go to its parent
+            # /img[i]                  and get the first img child
+            By.XPATH, "//input[@name='kaptchafield']/../img[1]"
+        ).screenshot_as_png
+    except NoSuchElementException:
+        print("Kaptcha not found")
+        return False
 
     kaptcha_pass = fuck_kaptcha.getKaptchaText(kaptcha_img)
 
@@ -106,7 +117,14 @@ def login(driver: webdriver):
             EC.presence_of_element_located((By.XPATH, "//span[contains(text(), 'Log Out')]"))
         )
     except TimeoutException:
-        return False
+        try:
+            alert = driver.find_element(By.CLASS_NAME, "red").text
+        finally:
+            if "Invalid Student ID or Password" in alert:
+                raise Exception(
+                    "Your student ID or password is invalid"
+                )
+            return False
     
     print("We are in!")
     return True
