@@ -169,6 +169,13 @@ def regsiterCourse(driver: webdriver, course: Course):
         "T": 99,
         "P": 99
     }
+    # To store the current selected slots, to prevent duplicate selection
+    selected_checkboxes = {
+        "L": None,
+        "T": None,
+        "P": None
+    }
+
     # loop through the timetable and select the course
     for row in timetable:
         try:
@@ -181,16 +188,32 @@ def regsiterCourse(driver: webdriver, course: Course):
         # Check if the class type and slot is in the list
         class_slots = course.slots.get(class_type)
         if class_slots != None and class_slot in class_slots:
+
+            # The index if the current slot in the class_slots list
+            # etc: class_type   = "L"         so bid for lecture slot
+            #      class_slots  = [5, 2, 9]   so bid for slot 5 first, with priority 0
+            current_slot_priority = class_slots.index(class_slot)
+
+            # Early return if the current slot is not the highest priority
+            if current_slot_priority > slot_priority[class_type]:
+                continue
             try:
-                row.find_element(By.CSS_SELECTOR, "input[type=checkbox]").click()
+                checkbox = row.find_element(By.CSS_SELECTOR, "input[type=checkbox]")
             except NoSuchElementException:
                 print("Holly shit you are late for this slot!")
             else:
-                max_slots -= 1
+                if slot_priority[class_type] == 99:
+                    # If this slot is newly selected, reduce the max_slots count
+                    max_slots -= 1
+                else:
+                    # If this slot is not newly selected, deselect the previous selected slot
+                    selected_checkboxes[class_type].click()
 
-        if max_slots == 0:
-            break
+                checkbox.click()
+                selected_checkboxes[class_type] = checkbox
+                slot_priority[class_type] = current_slot_priority
     
+    # Check how many slots are selected, alert if some slots are not selected
     if max_slots > 0:
         print("Shit, no available slots!")
         driver.get(REGISTER_URL)
