@@ -32,6 +32,7 @@ You hate UTAR? So do I! So I made this bot to bid for my timetable. This bot is 
     # config.py
     STUDENT_ID = "your_student_id"
     PASSWORD = "your_password"
+    FILENAME = "path_to_the_timetable_file"
     ```
     Replace `your_student_id` and `your_password` with your UTAR student ID and password.  
     etc:
@@ -39,6 +40,7 @@ You hate UTAR? So do I! So I made this bot to bid for my timetable. This bot is 
     # config.py
     STUDENT_ID = "123456789"
     PASSWORD = "password"
+    FILENAME = "MyTimetable.txt"
     ```
 7. Run the bot by running the following command:
     ```console
