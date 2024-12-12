@@ -5,13 +5,14 @@ You hate UTAR? So do I! So I made this bot to bid for my timetable. This bot is 
 
 ## Installation
 1. Install Python 3.7 or above
-2. Downlaod this repository
+2. Make sure you have Chrome installed on your computer. You can download it from [here](https://www.google.com/chrome/).
+3. Downlaod this repository
    In git bash, run the following command:
     ```bash
     git clone
     ```
     Or you can download the repository as a zip file and extract it.
-2. I will suggest you to create a virtual environment for this project to avoid any conflicts with your existing Python packages. You can do so by running the following command:
+4. I will suggest you to create a virtual environment for this project to avoid any conflicts with your existing Python packages. You can do so by running the following command:
     ```console
     python -m venv venv
     ```
@@ -21,16 +22,17 @@ You hate UTAR? So do I! So I made this bot to bid for my timetable. This bot is 
     venv\Scripts\activate
     ```
     You may also skip this step if you want to install the packages globally.
-4. Install the required packages by running the following command:
+5. Install the required packages by running the following command:
     ```console
     pip install -r requirements.txt
     ```
     If you are in a virtual environment, the packages will be installed in the virtual environment. Otherwise, the packages will be installed globally.
-5. Create a file called `config.py` in the current directory of the project. You can copy the content of `config_template.py` to `config.py` and fill in the required information.
+6. Create a file called `config.py` in the current directory of the project. You can copy the content of `config_template.py` to `config.py` and fill in the required information.
     ```python
     # config.py
     STUDENT_ID = "your_student_id"
     PASSWORD = "your_password"
+    FILENAME = "path_to_the_timetable_file"
     ```
     Replace `your_student_id` and `your_password` with your UTAR student ID and password.  
     etc:
@@ -38,8 +40,9 @@ You hate UTAR? So do I! So I made this bot to bid for my timetable. This bot is 
     # config.py
     STUDENT_ID = "123456789"
     PASSWORD = "password"
+    FILENAME = "MyTimetable.txt"
     ```
-6. Run the bot by running the following command:
+7. Run the bot by running the following command:
     ```console
     python fuck_utar.py
     ```

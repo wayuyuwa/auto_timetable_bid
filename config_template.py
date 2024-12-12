@@ -1,2 +1,0 @@
-STUDENT_ID = ""
-PASSWORD = ""

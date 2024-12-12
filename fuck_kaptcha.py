@@ -1,5 +1,8 @@
+# ddddocr library
 import ddddocr
-
+from PIL import Image
+if not hasattr(Image, 'ANTIALIAS'):
+    setattr(Image, 'ANTIALIAS', Image.LANCZOS)
 
 ocr = ddddocr.DdddOcr()
 def getKaptchaText(image: bytes):
