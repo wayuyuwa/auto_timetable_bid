@@ -161,6 +161,9 @@ def regsiterCourse(driver: webdriver, course: Course):
     except NoSuchElementException:
         print("Element not found in register course...")
         return False
+    except IndexError:
+        print("No timetable found")
+        return False
 
     max_slots = len(course.slots)
     # To select the slot with highest priority
