@@ -159,11 +159,18 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Sensitive Information
-config.py
-
 # Test files and folders
 utar/
-cookies.txt
-kaptcha.png
-MyTimetable.txt
+*.png
+*.txt
+!requirements.txt
+
+# Logs
+*.log
+
+# User settings
+user_settings.json
+
+# Selenium
+geckodriver.log
+chromedriver.log
