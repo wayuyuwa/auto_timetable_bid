@@ -4,7 +4,7 @@ cffi==1.17.1
 coloredlogs==15.0.1
 ddddocr==1.0.6
 flatbuffers==24.3.25
-h11==0.14.0
+h11==0.16.0
 humanfriendly==10.0
 idna==3.10
 mpmath==1.3.0
