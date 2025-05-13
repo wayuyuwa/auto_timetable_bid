@@ -62,7 +62,7 @@ jobs:
       with:
         name: UnitRegTimetable ${{ github.ref_name }}
         draft: false
-        prerelease: false
+        prerelease: ${{ endsWith(github.ref_name, 'beta') }}
         files: |
           ./artifacts/UnitRegTimetable.zip
       env:
