@@ -27,7 +27,8 @@ jobs:
         
     - name: Build executable
       run: python build_exe.py
-          - name: Prepare release package
+      
+    - name: Prepare release package
       run: |
         mkdir -p release_package
         copy dist\UnitRegTimetable.exe release_package\
