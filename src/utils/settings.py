@@ -44,8 +44,7 @@ class Settings:
         return {
             'student_id': '',
             'password': '',
-            'timetable_file': '',
-            'last_method': 'Selenium',
+            'method': 'BeautifulSoup',
             'headless_mode': False
         }
     
@@ -81,14 +80,14 @@ class Settings:
         """
         return self.settings.get('timetable_file', '')
     
-    def get_last_method(self) -> str:
+    def get_method(self) -> str:
         """
         Get last used scraping method.
         
         Returns:
             str: Last used method
         """
-        return self.settings.get('last_method', 'Selenium')
+        return self.settings.get('method', 'Selenium')
     
     def get_headless_mode(self) -> bool:
         """
@@ -99,11 +98,20 @@ class Settings:
         """
         return self.settings.get('headless_mode', False)
     
+    def get_max_retries(self) -> int:
+        """
+        Get maximum number of retries for scraping.
+        
+        Returns:
+            int: Maximum number of retries
+        """
+        return self.settings.get('max_retries', 3)
+    
     def update_settings(self, student_id: Optional[str] = None, 
                        password: Optional[str] = None,
-                       timetable_file: Optional[str] = None,
-                       last_method: Optional[str] = None,
-                       headless_mode: Optional[bool] = None):
+                       method: Optional[str] = None,
+                       headless_mode: Optional[bool] = None,
+                       max_retries: Optional[int] = None,):
         """
         Update settings.
         
@@ -111,17 +119,18 @@ class Settings:
             student_id (Optional[str]): Student ID to save
             password (Optional[str]): Password to save
             timetable_file (Optional[str]): Timetable file path to save
-            last_method (Optional[str]): Last used method to save
+            method (Optional[str]): Last used method to save
             headless_mode (Optional[bool]): Whether to enable headless mode
+            max_retries (Optional[int]): Maximum number of retries for scraping
         """
         if student_id is not None:
             self.settings['student_id'] = student_id
         if password is not None:
             self.settings['password'] = password
-        if timetable_file is not None:
-            self.settings['timetable_file'] = timetable_file
-        if last_method is not None:
-            self.settings['last_method'] = last_method
+        if method is not None:
+            self.settings['method'] = method
         if headless_mode is not None:
             self.settings['headless_mode'] = headless_mode
+        if max_retries is not None:
+            self.settings['max_retries'] = max_retries
         self.save_settings() 

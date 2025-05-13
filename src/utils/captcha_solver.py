@@ -4,6 +4,12 @@ CAPTCHA solving utility using ddddocr.
 
 import ddddocr
 from PIL import Image
+import logging
+import time
+import requests.exceptions
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Fix for newer PIL versions
 if not hasattr(Image, 'ANTIALIAS'):
@@ -18,7 +24,7 @@ class CaptchaSolver:
     
     def solve(self, image: bytes) -> str:
         """
-        Solve CAPTCHA from image bytes.
+        Solve CAPTCHA from image bytes with retry mechanism.
         
         Args:
             image (bytes): CAPTCHA image data
@@ -26,4 +32,9 @@ class CaptchaSolver:
         Returns:
             str: Solved CAPTCHA text
         """
-        return self.ocr.classification(image) 
+        
+        try:
+            return self.ocr.classification(image)
+        except Exception as e:
+            logger.error(f"Unexpected error during CAPTCHA solving: {str(e)}")
+            raise

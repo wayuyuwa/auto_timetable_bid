@@ -164,8 +164,10 @@ utar/
 *.png
 *.txt
 !requirements.txt
+data/
 
 # Logs
+logs/
 *.log
 
 # User settings

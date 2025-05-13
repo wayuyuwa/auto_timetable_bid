@@ -38,19 +38,19 @@ class TimetableReader:
             slot = re.search(r'(L|T|P)\((.*)\) -', course_lines[i])
             if not slot:
                 continue
-
+                
             slot_type = slot.group(1)
-            slot_nums = list(
+            slot_numbers = list(
                 # Convert the map to list
                 map(
                     # Convert each item in the list to number
                     lambda num: int(num),
-                    # Split the numbers with " or ", this produce a list
+                    # Split the numbers with " or ", this produces a list
                     slot.group(2).split(" or ")
                 )
             )
 
-            slots[slot_type] = slot_nums
+            slots[slot_type] = slot_numbers
 
         return Course(course_code, course_name, slots)
 
@@ -66,9 +66,13 @@ class TimetableReader:
             List[Course]: List of courses
         """
         # Open file
-        with open(filename, "r") as file:
+        with open(filename, "r", encoding="utf-8-sig") as file:
             # Read all lines that are not empty
-            lines = list(filter(lambda line: line != '\n', file.readlines()))[3:]
+            lines = list(filter(lambda line: line != '\n', file.readlines()))
+
+            if lines[0].startswith('NOTE'):
+                # TTAP format file
+                lines = lines[3:]
 
         courses = []  # List of courses
 
@@ -77,4 +81,4 @@ class TimetableReader:
             course = TimetableReader.read_course(lines[i:i+5])
             courses.append(course)
 
-        return courses 
+        return courses

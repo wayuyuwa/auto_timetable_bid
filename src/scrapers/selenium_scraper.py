@@ -10,20 +10,20 @@ from selenium.webdriver.common.alert import Alert
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, UnexpectedAlertPresentException, WebDriverException
-import logging
 import json
 from time import sleep
+from threading import Event
 from ..utils.config import (
     LOGIN_URL, LOGIN_PROCESS_URL, REGISTRATION_URL,
     HOME_URL, COURSE_REGISTRATION_URL, SELENIUM_OPTIONS,
-    WAIT_TIME_VELI_SHORT, WAIT_TIME_SHORT, WAIT_TIME_LONG
+    WAIT_TIME_VERY_SHORT, WAIT_TIME_SHORT, WAIT_TIME_LONG
 )
 from ..utils.captcha_solver import CaptchaSolver
-from ..utils.timetable_reader import TimetableReader, Course
+from ..utils.timetable_reader import Course
+from ..utils.logger import setup_logger
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 class SeleniumScraper:
     """Scraper implementation using Selenium."""
@@ -39,6 +39,22 @@ class SeleniumScraper:
         self.password = None
         self._is_cleaning_up = False
         self._headless_mode = False
+        self._cancellation_token = Event()
+        logger.info("SeleniumScraper initialized")
+
+    def cancel(self):
+        """Set the cancellation token to stop ongoing operations."""
+        self._cancellation_token.set()
+        logger.info("Cancellation requested")
+
+    def reset_cancellation(self):
+        """Reset the cancellation token."""
+        self._cancellation_token.clear()
+
+    def _check_cancellation(self):
+        """Check if operation has been cancelled."""
+        if self._cancellation_token.is_set():
+            raise Exception("Operation cancelled by user")
 
     def set_headless_mode(self, enabled: bool):
         """
@@ -106,6 +122,7 @@ class SeleniumScraper:
         self._initialize_driver()
         
         try:
+            self._check_cancellation()
             self.driver.get(LOGIN_URL)
         except WebDriverException as e:
             logger.error(f"Failed to navigate to login page: {str(e)}")
@@ -113,6 +130,7 @@ class SeleniumScraper:
 
         try:
             # Wait for the login form
+            self._check_cancellation()
             self._wait_for_element(By.CSS_SELECTOR, "form[name=frmParam]")
         except (TimeoutException, WebDriverException):
             if self.driver:
@@ -147,11 +165,11 @@ class SeleniumScraper:
             password_input.send_keys(password)
             kaptcha_input.send_keys(kaptcha_pass)
             kaptcha_input.send_keys(Keys.RETURN)
-
+            
             # Check login success
             self._wait_for_element(
                 By.XPATH, "//span[contains(text(), 'Log Out')]",
-                timeout=WAIT_TIME_VELI_SHORT
+                timeout=WAIT_TIME_VERY_SHORT
             )
         except (TimeoutException, WebDriverException):
             try:
@@ -281,9 +299,9 @@ class SeleniumScraper:
             submit_btn.click()
         except WebDriverException:
             return False
-
+            
         try:
-            WebDriverWait(self.driver, WAIT_TIME_VELI_SHORT).until(EC.alert_is_present())
+            WebDriverWait(self.driver, WAIT_TIME_VERY_SHORT).until(EC.alert_is_present())
         except (TimeoutException, WebDriverException):
             logger.info("Registered!")
             return True
@@ -304,27 +322,27 @@ class SeleniumScraper:
 
         return True
 
-    def register_courses(self, timetable_file: str) -> bool:
+    def register_courses(self, courses: list[Course]) -> bool:
         """
         Register multiple courses from a timetable file.
         
         Args:
-            timetable_file (str): Path to timetable file
+            courses (list[Course]): List of courses to register
             
         Returns:
             bool: True if all registrations successful
         """
         if not self.driver or self._is_cleaning_up:
             return False
-
-        courses = TimetableReader.read_timetable(timetable_file)
         
         try:
+            self._check_cancellation()
             self.driver.get(REGISTRATION_URL)
         except WebDriverException:
             return False
 
         try:
+            self._check_cancellation()
             self._wait_for_element(By.CSS_SELECTOR, "table#tblGrid")
         except (TimeoutException, WebDriverException):
             if self.session_expired():
@@ -338,14 +356,16 @@ class SeleniumScraper:
             loop = True
             while loop and not self._is_cleaning_up:
                 try:
+                    self._check_cancellation()
                     self._wait_for_element(
                         By.CSS_SELECTOR, "input[name=Register]",
-                        timeout=WAIT_TIME_VELI_SHORT
+                        timeout=WAIT_TIME_VERY_SHORT
                     )
                 except (TimeoutException, WebDriverException):
-                    logger.error("Registration is not open yet!")
+                    logger.info("Registration is not open yet!")
                     logger.info("Trying to relogin...")
                     while not self.login(self.student_id, self.password) and not self._is_cleaning_up:
+                        self._check_cancellation()
                         logger.info("Can't login, retrying...")
                     if not self._is_cleaning_up:
                         try:
@@ -357,6 +377,7 @@ class SeleniumScraper:
                     continue
 
                 try:
+                    self._check_cancellation()
                     register_btn = self.driver.find_element(By.CSS_SELECTOR, "input[name=Register]")
                 except (NoSuchElementException, WebDriverException):
                     logger.error("Something went wrong...")
@@ -381,8 +402,13 @@ class SeleniumScraper:
         if self.driver:
             try:
                 self.driver.quit()
-            except WebDriverException:
-                pass
+            except WebDriverException as e:
+                # Log the error but don't raise it since this is cleanup
+                logger.warning(f"Error during WebDriver cleanup: {str(e)}")
+            except Exception as e:
+                # Catch any other unexpected errors during cleanup
+                logger.warning(f"Unexpected error during WebDriver cleanup: {str(e)}")
             finally:
                 self.driver = None
-        self._is_cleaning_up = False 
+        self._is_cleaning_up = False
+        self.reset_cancellation()  # Reset cancellation token after cleanup
