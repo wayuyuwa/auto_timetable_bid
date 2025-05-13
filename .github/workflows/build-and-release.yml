@@ -1,0 +1,69 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Run when tag is pushed matching pattern v*, like v1.0.0
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Build executable
+      run: python build_exe.py
+      
+    - name: Prepare release package
+      run: |
+        mkdir -p release_package
+        copy dist\UnitRegTimetable.exe release_package\
+        copy config.ini release_package\
+        Compress-Archive -Path release_package\* -DestinationPath UnitRegTimetable.zip -Force
+        
+    - name: Archive release package
+      uses: actions/upload-artifact@v3
+      with:
+        name: UnitRegTimetable
+        path: |
+          UnitRegTimetable.zip
+          release_package\
+        
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only run on tag push
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Download build artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: UnitRegTimetable
+        path: ./artifacts
+        
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: UnitRegTimetable ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+        files: |
+          ./artifacts/UnitRegTimetable.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
