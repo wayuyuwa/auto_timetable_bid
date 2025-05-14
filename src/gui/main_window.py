@@ -6,6 +6,7 @@ import sys
 import socket
 import requests
 import time
+import threading
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QPushButton, QLabel, QComboBox, 
                            QLineEdit, QTextEdit, QMessageBox, QFileDialog,
@@ -18,6 +19,7 @@ from ..scrapers.beautifulsoup_scraper import BeautifulSoupScraper
 from ..scrapers.selenium_scraper import SeleniumScraper
 from ..utils.config import (
     WINDOW_TITLE, WINDOW_SIZE, WINDOW_POSITION,
+    BASE_DIR,
     LOGIN_URL
 )
 from ..utils.settings import Settings
@@ -63,6 +65,7 @@ class ScraperThread(QThread):
                 self.finished.emit(True, "Operation cancelled by user")
                 return
 
+            self.scraper.reset_cancellation()
             if self.method == "BeautifulSoup":
                 try:
                     # Emit progress update for login attempt
@@ -97,27 +100,31 @@ class ScraperThread(QThread):
                     self.finished.emit(True, "Operation cancelled by user")
                     return
 
-                if self.scraper.login(self.student_id, self.password):
-                    if not self.is_running:
-                        self.finished.emit(True, "Operation cancelled by user")
-                        return
+                try:
+                    if self.scraper.login(self.student_id, self.password):
+                        if not self.is_running:
+                            self.finished.emit(True, "Operation cancelled by user")
+                            return
 
-                    if self.courses:
-                        if self.scraper.register_courses(self.courses):
-                            self.finished.emit(True, "Course registration completed successfully!")
+                        if self.courses:
+                            if self.scraper.register_courses(self.courses):
+                                self.finished.emit(True, "Course registration completed successfully!")
+                            else:
+                                self.finished.emit(False, "Course registration failed. Check the logs for details.")
                         else:
-                            self.finished.emit(False, "Course registration failed. Check the logs for details.")
-                    else:
-                        # TODO: Implement basic scraping for Selenium
-                        self.finished.emit(True, "Selenium basic scraping not implemented yet")
+                            # TODO: Implement basic scraping for Selenium
+                            self.finished.emit(True, "Selenium basic scraping not implemented yet")
+                except Exception as e:
+                    self.finished.emit(False, str(e))
         except Exception as e:
             error_msg = str(e)
-            if "WebDriver is being cleaned up" in error_msg:
-                self.finished.emit(True, "WebDriver stopped successfully")
+            if "Operation cancelled by user" in error_msg or "WebDriver is being cleaned up" in error_msg:
+                self.finished.emit(True, "Operation cancelled by user")
             else:
                 self.finished.emit(False, f"Scraping failed: {error_msg}")
         finally:
-            if self.method == "Selenium":
+            # Always clean up resources in the finally block
+            if self.method == "Selenium" and self.scraper:
                 try:
                     self.scraper.cleanup()
                 except Exception as e:
@@ -126,15 +133,30 @@ class ScraperThread(QThread):
     def stop(self):
         """Stop the scraper operation."""
         self.is_running = False
-        if self.method == "Selenium":
+        # First set the cancellation flag and then separately handle cleanup based on scraper type
+        if self.scraper:
             try:
+                # Always cancel first
                 self.scraper.cancel()
-                self.scraper.cleanup()
-            except Exception as e:
-                logger.error(f"Error during cleanup: {str(e)}")
-        elif self.method == "BeautifulSoup":
-            try:
-                self.scraper.cancel()
+                
+                # For selenium, we need to start a watcher thread to ensure the driver gets shut down
+                if self.method == "Selenium":
+                    def force_quit_after_timeout():
+                        """Force quit the driver if cleanup takes too long"""
+                        # Wait up to 5 seconds for normal cleanup
+                        time.sleep(5)
+                        if hasattr(self.scraper, "driver") and self.scraper.driver:
+                            logger.warning("Forcing driver quit after timeout")
+                            try:
+                                driver_ref = self.scraper.driver
+                                if driver_ref:
+                                    driver_ref.quit()
+                                self.scraper.driver = None
+                            except Exception as e:
+                                logger.error(f"Error during forced driver quit: {str(e)}")
+                    
+                    # Start watchdog thread
+                    threading.Thread(target=force_quit_after_timeout, daemon=True).start()
             except Exception as e:
                 logger.error(f"Error during cancellation: {str(e)}")
 
@@ -148,7 +170,7 @@ class MainWindow(QMainWindow):
         self.setGeometry(*WINDOW_POSITION, *WINDOW_SIZE)
         
         # Set window icon
-        resources_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "resources")
+        resources_dir = os.path.join(BASE_DIR, "resources")
         icon_path = os.path.join(resources_dir, "icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -270,7 +292,7 @@ class MainWindow(QMainWindow):
         self.pw_input.setEchoMode(QLineEdit.Password)
         
         # Create custom eye icons
-        resources_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "resources")
+        resources_dir = os.path.join(BASE_DIR, "resources")
         eye_open_path = os.path.join(resources_dir, "eye-open.svg")
         eye_closed_path = os.path.join(resources_dir, "eye-closed.svg")
         
@@ -622,6 +644,30 @@ class MainWindow(QMainWindow):
                 logger.info(f"Set scraping method to: {formatted_method}")
                 return True
         return False
+
+    def closeEvent(self, event):
+        """Handle the window close event to ensure proper cleanup."""
+        # If a scraper thread is running, stop it
+        if self.scraper_thread and self.scraper_thread.isRunning():
+            logger.info("Application closing: Stopping scraper thread...")
+            try:
+                # Set cancellation flag and start the force quit process
+                self.scraper_thread.stop()
+                
+                # Give a short time for graceful cleanup
+                self.scraper_thread.wait(1000)  # Wait up to 1 second
+                
+                if self.scraper_thread.isRunning():
+                    logger.warning("Thread still running during application shutdown")
+                    # We don't want to block shutdown, so we just log the warning
+            except Exception as e:
+                logger.error(f"Error during shutdown cleanup: {str(e)}")
+        
+        # Save settings
+        self._save_settings()
+        
+        # Accept the close event
+        event.accept()
 
 def main(args=None):
     """Main entry point for the application."""

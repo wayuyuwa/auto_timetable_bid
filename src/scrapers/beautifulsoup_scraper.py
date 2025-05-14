@@ -753,6 +753,7 @@ class BeautifulSoupScraper:
         """
         try:
             self.session.close()
+            self._cancellation_token.set()
             logger.info("Session cancelled successfully.")
         except Exception as e:
             logger.error(f"Error cancelling session: {str(e)}")

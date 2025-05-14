@@ -14,6 +14,7 @@ import os
 import csv
 from ..utils.timetable_reader import TimetableReader, Course
 from ..utils.logger import setup_logger
+from ..utils.config import BASE_DIR
 
 logger = setup_logger(__name__)
 
@@ -29,7 +30,9 @@ class CourseManager(QDialog):
         self.setMinimumSize(1000, 800)
         
         # Load existing courses
-        self.courses_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'courses.json')
+        app_data_dir = os.path.join(BASE_DIR, 'data')
+        os.makedirs(app_data_dir, exist_ok=True)
+        self.courses_file = os.path.join(app_data_dir, 'courses.json')
         self.courses = self._load_courses()
         
         # Track currently selected course for editing

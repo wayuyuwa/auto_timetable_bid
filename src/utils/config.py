@@ -11,6 +11,22 @@ from typing import Dict, List
 # Configure logging
 logger = logging.getLogger(__name__)
 
+def get_base_dir():
+    """
+    Get the base directory of the application.
+    
+    Returns:
+        str: The base directory path
+        - When running as executable: directory containing the executable
+        - When running as script: the project root directory
+    """
+    if getattr(sys, 'frozen', False):
+        # Running as a bundled executable
+        return os.path.dirname(sys.executable)
+    else:
+        # Running as a script
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def load_config() -> configparser.ConfigParser:
     """Load configuration from config.ini file."""
     config = configparser.ConfigParser()
