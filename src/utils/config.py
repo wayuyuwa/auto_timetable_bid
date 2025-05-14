@@ -46,14 +46,15 @@ def create_default_config() -> configparser.ConfigParser:
     """Create a default configuration when config.ini is missing."""
     config = configparser.ConfigParser()
     
+    base_url = 'https://unitreg.utar.edu.my/portal/courseRegStu'
     # Default URLs
     config['URLs'] = {
-        'base_url': 'https://unitreg.utar.edu.my',
-        'login_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/login.jsp',
-        'login_process_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/login_proc.jsp',
-        'registration_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/registration/registerUnitSurvey.jsp',
-        'home_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/mainpage.jsp',
-        'course_registration_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/registration/registerCourse.jsp'
+        'base_url': f'{base_url}/',
+        'login_url': f'{base_url}/login.jsp',
+        'login_process_url': f'{base_url}/login_proc.jsp',
+        'registration_url': f'{base_url}/registration/registerUnitSurvey.jsp',
+        'home_url': f'{base_url}/mainpage.jsp',
+        'course_registration_url': f'{base_url}/registration/registerCourse.jsp'
     }
     
     # Default Headers

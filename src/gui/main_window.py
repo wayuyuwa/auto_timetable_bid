@@ -255,6 +255,8 @@ class MainWindow(QMainWindow):
         id_layout = QHBoxLayout()
         id_label = QLabel("Student ID:")
         self.id_input = QLineEdit()
+        self.id_input.setPlaceholderText("Enter your student ID e.g. 2101234")
+        self.id_input.editingFinished.connect(self._save_settings)
         id_layout.addWidget(id_label)
         id_layout.addWidget(self.id_input)
         credentials_layout.addLayout(id_layout)
@@ -263,6 +265,8 @@ class MainWindow(QMainWindow):
         pw_layout = QHBoxLayout()
         pw_label = QLabel("Password:")
         self.pw_input = QLineEdit()
+        self.pw_input.setPlaceholderText("Enter your password")
+        self.pw_input.editingFinished.connect(self._save_settings)
         self.pw_input.setEchoMode(QLineEdit.Password)
         
         # Create custom eye icons

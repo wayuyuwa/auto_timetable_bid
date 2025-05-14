@@ -437,70 +437,61 @@ class BeautifulSoupScraper:
                 result_text += f"Course: {course.code} - {course.name}\n"
                 
                 try:
-                    # # Step 1: Fetch student info for the course
-                    # student_data = self._fetch_student_info(course.code)
-                    # if not student_data:
-                    #     logger.warning(f"Could not fetch student info for {course.code}")
-                    #     result_text += f"Failed to fetch student information\n"
-                    #     continue
+                    # Step 1: Fetch student info for the course
+                    student_data = self._fetch_student_info(course.code)
+                    if not student_data:
+                        logger.warning(f"Could not fetch student info for {course.code}")
+                        result_text += f"Failed to fetch student information\n"
+                        continue
                     
-                    # self._check_cancellation()
+                    self._check_cancellation()
                     
-                    # # Extract required values from student data
-                    # student_id = student_data.get('student_id')
-                    # paper_type = student_data.get('paper_type')
-                    # req_session = student_data.get('req_session')
-                    # req_sid = student_data.get('reqsid')
-                    # req_with_class = student_data.get('req_with_class')
+                    # Extract required values from student data
+                    student_id = student_data.get('student_id')
+                    paper_type = student_data.get('paper_type')
+                    req_session = student_data.get('req_session')
+                    req_sid = student_data.get('reqsid')
+                    req_with_class = student_data.get('req_with_class')
                     
-                    # result_text += f"Student ID: {student_id}\n"
+                    result_text += f"Student ID: {student_id}\n"
                     
-                    # # Step 2: Get all class types and their corresponding values
-                    # class_values = {}
+                    # Step 2: Get all class types and their corresponding values
+                    class_values = {}
                     
-                    # # Group classes by type (L, T, P)
-                    # for class_type, slot_numbers in course.slots.items():
-                    #     if not slot_numbers:  # Skip empty slots
-                    #         continue
+                    # Group classes by type (L, T, P)
+                    for class_type, slot_numbers in course.slots.items():
+                        if not slot_numbers:  # Skip empty slots
+                            continue
                         
-                    #     # For each slot number in priority order
-                    #     for slot_number in slot_numbers:
-                    #         class_code = f"{class_type}{slot_number}"
-                    #         course_value = self._fetch_course_value(course.code, class_code)
+                        # For each slot number in priority order
+                        for slot_number in slot_numbers:
+                            class_code = f"{class_type}{slot_number}"
+                            course_value = self._fetch_course_value(course.code, class_code)
                             
-                    #         if course_value:
-                    #             class_values[class_code] = course_value
-                    #             result_text += f"Found {class_code} value: {course_value[:8]}...\n"
-                    #             break  # Stop after finding the first available slot for each type
-                    #         else:
-                    #             result_text += f"Could not find {class_code} value\n"
+                            if course_value:
+                                class_values[class_code] = course_value
+                                result_text += f"Found {class_code} value: {course_value[:8]}...\n"
+                                break  # Stop after finding the first available slot for each type
+                            else:
+                                result_text += f"Could not find {class_code} value\n"
                     
-                    # # Check if we found values for all required class types
-                    # if len(class_values) < len(course.slots):
-                    #     missing_types = set(course.slots.keys()) - {code[0] for code in class_values.keys()}
-                    #     logger.warning(f"Could not find values for all required class types: {missing_types}")
-                    #     result_text += f"Missing values for class types: {', '.join(missing_types)}\n"
-                    #     continue
+                    # Check if we found values for all required class types
+                    if len(class_values) < len(course.slots):
+                        missing_types = set(course.slots.keys()) - {code[0] for code in class_values.keys()}
+                        logger.warning(f"Could not find values for all required class types: {missing_types}")
+                        result_text += f"Missing values for class types: {', '.join(missing_types)}\n"
+                        continue
                     
                     # Step 3: Submit registration using the bidding approach
                     bidding_result = self._submit_bidding(
-                        "MPU33013",
-                        "2103370",
-                        "paper_type",
-                        "202506",
-                        "18021",
-                        "Y",
-                        ["624953", "628344"]
+                        course.code,
+                        student_id,
+                        paper_type,
+                        req_session,
+                        req_sid,
+                        req_with_class,
+                        list(class_values.values())
                     )
-                    # bidding_result = self._submit_bidding(
-                    #     course.code,
-                    #     student_id,
-                    #     paper_type,
-                    #     req_session,
-                    #     req_sid,
-                    #     req_with_class,
-                    #     list(class_values.values())
-                    # )
                     
                     if bidding_result.get('success'):
                         logger.info(f"Successfully registered {course.code}")
@@ -745,7 +736,7 @@ class BeautifulSoupScraper:
             
             # If we can't definitively determine the status
             return {
-                'success': True,
+                'success': False,
                 'message': "Bidding request submitted, but status unclear"
             }
             
