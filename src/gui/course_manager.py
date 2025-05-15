@@ -71,7 +71,7 @@ class CourseManager(QDialog):
         
         self.import_path = DropLineEdit()
         self.import_path.setReadOnly(True)
-        self.import_path.setPlaceholderText("Drag & drop a file here or click Browse...")
+        self.import_path.setPlaceholderText("Drag & drop a TTAP/courses json file here or click Browse...")
         
         import_btn = QPushButton("Browse...")
         import_btn.clicked.connect(self._import_courses)

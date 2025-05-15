@@ -257,7 +257,7 @@ class MainWindow(QMainWindow):
         scraping_layout.addWidget(self.selenium_group)
 
         # Registration options group
-        registration_group = QGroupBox("Registration Options (Not applicable for Selenium)")
+        registration_group = QGroupBox("Registration Options")
         registration_layout = QHBoxLayout()
         retry_label = QLabel("Max Retries:")
         self.retry_combo = QComboBox()
@@ -464,9 +464,10 @@ class MainWindow(QMainWindow):
         self.id_input.setText(self.settings.get_student_id())
         self.pw_input.setText(self.settings.get_password())
         self.method_combo.setCurrentText(self.settings.get_method())
-        self._on_method_changed(self.method_combo.currentText())
         self.headless_checkbox.setChecked(self.settings.get_headless_mode())
-        self.retry_combo.setCurrentText = str(self.settings.get_max_retries())
+        print(str(self.settings.get_max_retries()))
+        self.retry_combo.setCurrentText(str(self.settings.get_max_retries()))
+        self._on_method_changed(self.method_combo.currentText())
     
     def _save_settings(self):
         """Save current settings."""
@@ -481,6 +482,7 @@ class MainWindow(QMainWindow):
     def _on_method_changed(self, method: str):
         """Handle method selection change."""
         self.selenium_group.setVisible(method == "Selenium")
+        self.retry_combo.setVisible(method == "BeautifulSoup")
         self._save_settings()
         logger.info(f"Scraping method changed to: {method}")
     
