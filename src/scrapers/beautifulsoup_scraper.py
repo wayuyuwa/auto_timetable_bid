@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import urllib3
 import socket
 from time import sleep
-from threading import Event
+from threading import Event, Lock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from ..utils.config import (
@@ -17,14 +17,16 @@ from ..utils.config import (
 from ..utils.captcha_solver import CaptchaSolver
 from ..utils.logger import setup_logger
 from ..utils.timetable_reader import Course
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configure logging
 logger = setup_logger(__name__)
+
+class SessionExpiredException(Exception):
+    """Exception raised when the session has expired."""
+    pass
 
 class BeautifulSoupScraper:
     """Scraper implementation using BeautifulSoup."""
@@ -65,6 +67,13 @@ class BeautifulSoupScraper:
         
         # Add cancellation token
         self._cancellation_token = Event()
+        
+        # Store credentials for auto-relogin
+        self._student_id = None
+        self._password = None
+        self._is_logged_in = False
+        self._relogin_lock = Lock()  # Lock to prevent multiple relogin attempts
+        
         logger.info("BeautifulSoupScraper initialized")
 
     def cancel(self):
@@ -82,6 +91,76 @@ class BeautifulSoupScraper:
         if self._cancellation_token.is_set():
             logger.info("Operation cancelled by user")
             raise Exception("Operation cancelled by user")
+            
+    def _check_session_expired(self, response):
+        """
+        Check if the session has expired based on the response content.
+        
+        Args:
+            response (Response): The HTTP response object
+            
+        Raises:
+            SessionExpiredException: If the session has expired
+        """
+        if response.status_code == 200:
+            content = response.content.decode('utf-8', errors='ignore')
+            # Check for session expired redirects in JavaScript
+            if "window.parent.location.href" in content and "sessionExpired" in content:
+                logger.warning("Session has expired")
+                self._is_logged_in = False
+                raise SessionExpiredException("Session has expired. Please log in again.")
+
+    def _try_relogin(self):
+        """
+        Attempt to relogin if credentials are available.
+        
+        Returns:
+            bool: True if relogin was successful, False otherwise
+        """
+        # Skip if no credentials available
+        if not self._student_id or not self._password:
+            logger.warning("Cannot relogin: No stored credentials")
+            return False
+            
+        # Prevent multiple simultaneous relogin attempts
+        with self._relogin_lock:
+            if self._is_logged_in:
+                # Another thread already relogged in successfully
+                return True
+                
+            logger.info("Attempting to relogin due to session expiration")
+            try:
+                # Clear the session and create a new one
+                self.session.close()
+                self.session = requests.Session()
+                
+                # Configure retry strategy again
+                retry_strategy = Retry(
+                    total=3,
+                    backoff_factor=0.5,
+                    status_forcelist=[429, 500, 502, 503, 504],
+                    allowed_methods=["GET", "POST"]
+                )
+                
+                # Mount adapter with retry strategy
+                adapter = HTTPAdapter(max_retries=retry_strategy)
+                self.session.mount("http://", adapter)
+                self.session.mount("https://", adapter)
+                
+                # Attempt login with stored credentials
+                login_result = self.login(self._student_id, self._password)
+                
+                if 'success' in login_result:
+                    self._is_logged_in = True
+                    logger.info("Successfully relogged in after session expiration")
+                    return True
+                else:
+                    logger.error("Failed to relogin after session expiration")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Error during relogin attempt: {str(e)}")
+                return False
 
     async def fetch_student_info(self, unit_code: str, group_code: str) -> dict:
         """
@@ -109,6 +188,7 @@ class BeautifulSoupScraper:
                 verify=False
             )
             
+            self._check_session_expired(response)
             self._check_cancellation()
             
             if response.status_code != 200:
@@ -138,6 +218,13 @@ class BeautifulSoupScraper:
             
             return result
             
+        except SessionExpiredException:
+            # Try to relogin and retry the operation
+            if self._try_relogin():
+                logger.info("Retrying fetch_student_info after successful relogin")
+                return await self.fetch_student_info(unit_code, group_code)
+            else:
+                raise Exception('Session expired and relogin failed')
         except Exception as e:
             # Check if cancellation was the cause
             self._check_cancellation()
@@ -172,6 +259,7 @@ class BeautifulSoupScraper:
                 verify=False
             )
             
+            self._check_session_expired(response)
             self._check_cancellation()
             
             if response.status_code != 200:
@@ -195,13 +283,20 @@ class BeautifulSoupScraper:
             
             raise Exception(f'Group {group_code} not found for unit {unit_code}')
             
+        except SessionExpiredException:
+            # Try to relogin and retry the operation
+            if self._try_relogin():
+                logger.info("Retrying fetch_course_value after successful relogin")
+                return await self.fetch_course_value(unit_code, group_code)
+            else:
+                raise Exception('Session expired and relogin failed')
         except Exception as e:
             # Check if cancellation was the cause
             self._check_cancellation()
             # If we get here, it was another exception
             raise Exception(f'Request failed: {str(e)}')
     
-    def login(self, student_id: str, password: str, max_retries: int = 3) -> dict:
+    def login(self, student_id: str, password: str, max_retries: int = 5) -> dict:
         """
         Handle the login process including CAPTCHA.
         
@@ -220,6 +315,11 @@ class BeautifulSoupScraper:
         if not student_id or not password:
             raise Exception("Student ID and password are required!")
 
+        # Store credentials for potential relogin
+        self._student_id = student_id
+        self._password = password
+        self._is_logged_in = False
+        
         retry_count = 0
         while retry_count < max_retries:
             try:
@@ -311,11 +411,26 @@ class BeautifulSoupScraper:
                     data=payload,
                     verify=False
                 )
+
+                try:
+                    self._check_session_expired(login_response)
+                except SessionExpiredException:
+                    # If we get a session expired during login, that's unexpected but we should retry
+                    logger.warning("Received session expired during login attempt, retrying...")
+                    retry_count += 1
+                    sleep(1)
+                    continue
                 
                 self._check_cancellation()
                 
-                if 'Invalid' in login_response.text:
+                if 'Invalid code' in login_response.text:
                     # This is a critical error - invalid credentials
+                    logger.error("Invalid CAPTCHA code entered. Retrying...")
+                    retry_count += 1
+                    continue
+                elif 'Invalid' in login_response.text:
+                    # This is a critical error - invalid credentials
+                    self._is_logged_in = False
                     raise Exception('Login failed. Please check your credentials.')
                 
                 # Get home page data
@@ -326,11 +441,19 @@ class BeautifulSoupScraper:
                     sleep(1)
                     continue
                 
+                # Set logged in flag
+                self._is_logged_in = True
+                
                 return {
                     'success': 'Login successful',
                     'students_data': home_data
                 }
                 
+            except SessionExpiredException:
+                logger.warning("Session expired during login, retrying...")
+                retry_count += 1
+                sleep(1)
+                continue
             except requests.RequestException as e:
                 logger.warning(f"Request failed: {str(e)}, retrying...")
                 retry_count += 1
@@ -343,6 +466,7 @@ class BeautifulSoupScraper:
                 # If we get here, it wasn't a cancellation
                 if "check your credentials" in str(e):
                     # Re-raise critical errors
+                    self._is_logged_in = False
                     raise
                 
                 logger.warning(f"Login attempt failed: {str(e)}, retrying...")
@@ -351,6 +475,7 @@ class BeautifulSoupScraper:
                 continue
         
         # If we've exhausted all retries
+        self._is_logged_in = False
         raise Exception(f"Login failed after {max_retries} attempts. Please try again later.")
 
     def get_home_page_data(self) -> tuple:
@@ -364,6 +489,8 @@ class BeautifulSoupScraper:
             self._check_cancellation()
             
             response = self.session.get(COURSE_REGISTRATION_URL, headers=self.headers, verify=False)
+            
+            self._check_session_expired(response)
             
             if response.status_code != 200:
                 logger.info(f'Failed to retrieve home page. Status code: {response.status_code}')
@@ -396,6 +523,13 @@ class BeautifulSoupScraper:
             
             return data, self.session.cookies.get_dict()
             
+        except SessionExpiredException:
+            # Try to relogin and retry the operation
+            if self._try_relogin():
+                logger.info("Retrying get_home_page_data after successful relogin")
+                return self.get_home_page_data()
+            else:
+                raise Exception('Session expired and relogin failed')
         except Exception as e:
             # Check if cancellation was the cause
             self._check_cancellation()
@@ -430,77 +564,68 @@ class BeautifulSoupScraper:
         while failed_courses and retry_count < self.max_retries:
             self._check_cancellation()
             
-            for course in list(failed_courses):  # Create a copy for safe iteration
+            for course in list(failed_courses):
                 self._check_cancellation()
                 
                 logger.info(f"Attempting to register course: {course.code} - {course.name}")
                 result_text += f"Course: {course.code} - {course.name}\n"
                 
                 try:
-                    # # Step 1: Fetch student info for the course
-                    # student_data = self._fetch_student_info(course.code)
-                    # if not student_data:
-                    #     logger.warning(f"Could not fetch student info for {course.code}")
-                    #     result_text += f"Failed to fetch student information\n"
-                    #     continue
+                    # Step 1: Fetch student info for the course
+                    student_data = self._fetch_student_info(course.code)
+                    if not student_data:
+                        logger.warning(f"Could not fetch student info for {course.code}")
+                        result_text += f"Failed to fetch student information\n"
+                        continue
                     
-                    # self._check_cancellation()
+                    self._check_cancellation()
                     
-                    # # Extract required values from student data
-                    # student_id = student_data.get('student_id')
-                    # paper_type = student_data.get('paper_type')
-                    # req_session = student_data.get('req_session')
-                    # req_sid = student_data.get('reqsid')
-                    # req_with_class = student_data.get('req_with_class')
+                    # Extract required values from student data
+                    student_id = student_data.get('student_id')
+                    paper_type = student_data.get('paper_type')
+                    req_session = student_data.get('req_session')
+                    req_sid = student_data.get('reqsid')
+                    req_with_class = student_data.get('req_with_class')
                     
-                    # result_text += f"Student ID: {student_id}\n"
+                    result_text += f"Student ID: {student_id}\n"
                     
-                    # # Step 2: Get all class types and their corresponding values
-                    # class_values = {}
+                    # Step 2: Get all class types and their corresponding values
+                    class_values = {}
                     
-                    # # Group classes by type (L, T, P)
-                    # for class_type, slot_numbers in course.slots.items():
-                    #     if not slot_numbers:  # Skip empty slots
-                    #         continue
+                    # Group classes by type (L, T, P)
+                    for class_type, slot_numbers in course.slots.items():
+                        if not slot_numbers:  # Skip empty slots
+                            continue
                         
-                    #     # For each slot number in priority order
-                    #     for slot_number in slot_numbers:
-                    #         class_code = f"{class_type}{slot_number}"
-                    #         course_value = self._fetch_course_value(course.code, class_code)
+                        # For each slot number in priority order
+                        for slot_number in slot_numbers:
+                            class_code = f"{class_type}{slot_number}"
+                            course_value = self._fetch_course_value(course.code, class_code)
                             
-                    #         if course_value:
-                    #             class_values[class_code] = course_value
-                    #             result_text += f"Found {class_code} value: {course_value[:8]}...\n"
-                    #             break  # Stop after finding the first available slot for each type
-                    #         else:
-                    #             result_text += f"Could not find {class_code} value\n"
+                            if course_value:
+                                class_values[class_code] = course_value
+                                result_text += f"Found {class_code} value: {course_value[:8]}...\n"
+                                break  # Stop after finding the first available slot for each type
+                            else:
+                                result_text += f"Could not find {class_code} value\n"
                     
-                    # # Check if we found values for all required class types
-                    # if len(class_values) < len(course.slots):
-                    #     missing_types = set(course.slots.keys()) - {code[0] for code in class_values.keys()}
-                    #     logger.warning(f"Could not find values for all required class types: {missing_types}")
-                    #     result_text += f"Missing values for class types: {', '.join(missing_types)}\n"
-                    #     continue
+                    # Check if we found values for all required class types
+                    if len(class_values) < sum(1 for slots in course.slots.values() if slots):
+                        missing_types = set(course.slots.keys()) - {code[0] for code in class_values.keys()}
+                        logger.warning(f"Could not find values for all required class types: {missing_types}")
+                        result_text += f"Missing values for class types: {', '.join(missing_types)}\n"
+                        continue
                     
                     # Step 3: Submit registration using the bidding approach
                     bidding_result = self._submit_bidding(
-                        "MPU33013",
-                        "2103370",
-                        "paper_type",
-                        "202506",
-                        "18021",
-                        "Y",
-                        ["624953", "628344"]
+                        course.code,
+                        student_id,
+                        paper_type,
+                        req_session,
+                        req_sid,
+                        req_with_class,
+                        list(class_values.values())
                     )
-                    # bidding_result = self._submit_bidding(
-                    #     course.code,
-                    #     student_id,
-                    #     paper_type,
-                    #     req_session,
-                    #     req_sid,
-                    #     req_with_class,
-                    #     list(class_values.values())
-                    # )
                     
                     if bidding_result.get('success'):
                         logger.info(f"Successfully registered {course.code}")
@@ -511,6 +636,19 @@ class BeautifulSoupScraper:
                         logger.warning(f"Registration failed for {course.code}: {bidding_result.get('error')}")
                         result_text += f"{bidding_result.get('error', 'Registration failed')}\n"
                         registration_success = False
+                
+                except SessionExpiredException:
+                    logger.warning(f"Session expired while registering {course.code}, attempting relogin")
+                    # Try to relogin and continue
+                    if self._try_relogin():
+                        logger.info(f"Successfully relogged in, continuing with registration for {course.code}")
+                        result_text += "Session expired but successfully relogged in\n"
+                        # Don't mark as failure, just continue with this course in the next iteration
+                    else:
+                        logger.error(f"Session expired and relogin failed while registering {course.code}")
+                        result_text += "Session expired and relogin failed. Please log in again.\n"
+                        registration_success = False
+                        return result_text, registration_success
                     
                 except Exception as e:
                     self._check_cancellation()  # Check if it was cancelled
@@ -552,6 +690,7 @@ class BeautifulSoupScraper:
                 verify=False
             )
             
+            self._check_session_expired(response)
             self._check_cancellation()
             
             if response.status_code != 200:
@@ -582,6 +721,14 @@ class BeautifulSoupScraper:
             logger.info(f"Student info fetched: {result['student_id']}")
             return result
             
+        except SessionExpiredException:
+            # Try to relogin and retry the operation
+            if self._try_relogin():
+                logger.info("Retrying _fetch_student_info after successful relogin")
+                return self._fetch_student_info(unit_code)
+            else:
+                logger.error("Failed to relogin after session expiration")
+                return None
         except Exception as e:
             self._check_cancellation()
             logger.error(f"Error fetching student info: {str(e)}")
@@ -615,6 +762,7 @@ class BeautifulSoupScraper:
                 verify=False
             )
             
+            self._check_session_expired(response)
             self._check_cancellation()
             
             if response.status_code != 200:
@@ -640,6 +788,14 @@ class BeautifulSoupScraper:
             logger.warning(f"Group {group_code} not found for unit {unit_code}")
             return None
             
+        except SessionExpiredException:
+            # Try to relogin and retry the operation
+            if self._try_relogin():
+                logger.info("Retrying _fetch_course_value after successful relogin")
+                return self._fetch_course_value(unit_code, group_code)
+            else:
+                logger.error("Failed to relogin after session expiration")
+                return None
         except Exception as e:
             self._check_cancellation()
             logger.error(f"Error fetching course value: {str(e)}")
@@ -691,6 +847,8 @@ class BeautifulSoupScraper:
                 verify=False
             )
             
+            self._check_session_expired(response)
+            
             if response.status_code != 200:
                 return {
                     'success': False,
@@ -700,55 +858,30 @@ class BeautifulSoupScraper:
             # Parse the response to check for success or error messages
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Check for error messages
-            error_msg = soup.find('font', {'color': 'red'})
-            if error_msg:
-                error_text = error_msg.get_text(strip=True)
-                
-                # Check specific error messages
-                if "exceeded the maximum number of credit hours" in error_text.lower():
-                    return {
-                        'success': False,
-                        'error': "Maximum credit hours reached"
-                    }
-                elif "the time of selected units are clashed" in error_text.lower():
-                    return {
-                        'success': False,
-                        'error': "Time clash with other registered courses"
-                    }
-                elif "please select a valid class combination" in error_text.lower():
-                    return {
-                        'success': False,
-                        'error': "Invalid class combination"
-                    }
-                else:
-                    return {
-                        'success': False,
-                        'error': error_text
-                    }
-            
-            # Check for success messages
-            success_msg = soup.find('font', {'color': 'blue'})
-            if success_msg and "successful" in success_msg.get_text(strip=True).lower():
+            # Check for success messages with class = red
+            success_msg = soup.find('div', class_='red')
+            # check if insert-success is in response.url
+            if response.url and "insert-success" in response.url or\
+                success_msg and "success" in success_msg.get_text(strip=True).lower():
                 return {
                     'success': True,
                     'message': "Course registration successful!"
                 }
             
-            # Check if the course appears in the registration table
-            reg_table = soup.find('table', {'id': 'tblGrid'})
-            if reg_table and unit_code in reg_table.get_text():
-                return {
-                    'success': True,
-                    'message': "Course registration confirmed in timetable"
-                }
-            
             # If we can't definitively determine the status
             return {
-                'success': True,
-                'message': "Bidding request submitted, but status unclear"
+                'success': False,
+                'error': "Bidding request submitted, but status unclear"
             }
             
+        except SessionExpiredException:
+            # Try to relogin and retry the operation
+            if self._try_relogin():
+                logger.info("Retrying _submit_bidding after successful relogin")
+                return self._submit_bidding(unit_code, student_id, paper_type, req_session, req_sid, req_with_class, req_mids)
+            else:
+                # Propagate the session expired exception to be handled by the caller
+                raise
         except Exception as e:
             logger.error(f"Error in bidding submission: {str(e)}")
             return {
@@ -762,6 +895,8 @@ class BeautifulSoupScraper:
         """
         try:
             self.session.close()
+            self._cancellation_token.set()
+            self._is_logged_in = False
             logger.info("Session cancelled successfully.")
         except Exception as e:
             logger.error(f"Error cancelling session: {str(e)}")

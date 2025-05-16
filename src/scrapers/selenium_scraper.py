@@ -11,6 +11,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, UnexpectedAlertPresentException, WebDriverException
 import json
+import threading
+import time
 from time import sleep
 from threading import Event
 from ..utils.config import (
@@ -46,6 +48,41 @@ class SeleniumScraper:
         """Set the cancellation token to stop ongoing operations."""
         self._cancellation_token.set()
         logger.info("Cancellation requested")
+        
+        # Force interrupt any running operations by starting cleanup in a separate thread
+        if self.driver and not self._is_cleaning_up:
+            # Start a watchdog thread to force quit if cleanup takes too long
+            watchdog_thread = threading.Thread(
+                target=self._force_quit_watchdog,
+                daemon=True
+            )
+            watchdog_thread.start()
+
+    def _force_quit_watchdog(self):
+        """Watchdog that force quits the driver if cleanup is taking too long."""
+        # Wait a short time for normal cleanup
+        wait_time = 5  # seconds
+        start_time = time.time()
+        
+        while time.time() - start_time < wait_time:
+            if not self.driver:  # Driver already cleaned up
+                return
+            time.sleep(0.5)
+            
+        logger.warning("Cleanup taking too long, force quitting WebDriver")
+        # If we reach here, cleanup is taking too long, force quit the driver
+        try:
+            if self.driver:
+                # Keep a reference to avoid issues if driver gets nulled
+                driver_ref = self.driver
+                try:
+                    driver_ref.quit()
+                except Exception as e:
+                    logger.error(f"Error during force quit: {str(e)}")
+                finally:
+                    self.driver = None
+        except Exception as e:
+            logger.error(f"Error during force driver quit: {str(e)}")
 
     def reset_cancellation(self):
         """Reset the cancellation token."""
@@ -85,9 +122,24 @@ class SeleniumScraper:
         """Wait for an element to be present on the page."""
         if not self.driver or self._is_cleaning_up:
             raise WebDriverException("WebDriver is not initialized or is being cleaned up")
-        return WebDriverWait(self.driver, timeout).until(
-            EC.presence_of_element_located((by, value))
-        )
+        
+        # Create a wait with more frequent checks for cancellation
+        wait = WebDriverWait(self.driver, timeout, poll_frequency=0.5)
+        
+        # Define a custom condition that checks for cancellation
+        def element_present_with_cancellation_check(driver):
+            self._check_cancellation()
+            element = driver.find_element(by, value)
+            return element if element else False
+        
+        # Use the custom condition
+        try:
+            return wait.until(element_present_with_cancellation_check)
+        except Exception as e:
+            # Check if cancellation was requested
+            self._check_cancellation()
+            # If not, re-raise the original exception
+            raise e
 
     def session_expired(self) -> bool:
         """Check if the session has expired."""
@@ -210,11 +262,13 @@ class SeleniumScraper:
             return False
 
         try:
+            self._check_cancellation()
             self.driver.get(COURSE_REGISTRATION_URL)
         except WebDriverException:
             return False
 
         try:
+            self._check_cancellation()
             self._wait_for_element(By.CSS_SELECTOR, "table#tblGrid")
         except (TimeoutException, WebDriverException):
             if self.session_expired():
@@ -229,12 +283,14 @@ class SeleniumScraper:
 
         logger.info(f"Registering course {course.code} - {course.name}...")
         try:
+            self._check_cancellation()
             course_input.send_keys(course.code)
             course_input.send_keys(Keys.RETURN)
         except WebDriverException:
             return False
 
         try:
+            self._check_cancellation()
             self._wait_for_element(By.CSS_SELECTOR, "form[name=frmSummary]")
         except (TimeoutException, WebDriverException):
             if self.driver:
@@ -253,6 +309,7 @@ class SeleniumScraper:
         selected_checkboxes = {"L": None, "T": None, "P": None}
 
         for row in timetable:
+            self._check_cancellation()
             try:
                 class_type = row.find_element(By.CSS_SELECTOR, "td:nth-child(2)").text
                 class_slot = int(row.find_element(By.CSS_SELECTOR, "td:nth-child(3)").text)
@@ -296,14 +353,30 @@ class SeleniumScraper:
             return True
 
         try:
+            self._check_cancellation()
             submit_btn.click()
         except WebDriverException:
             return False
             
         try:
-            WebDriverWait(self.driver, WAIT_TIME_VERY_SHORT).until(EC.alert_is_present())
+            # Using a shorter timeout with check_cancellation
+            wait = WebDriverWait(self.driver, WAIT_TIME_VERY_SHORT, poll_frequency=0.2)
+            
+            def alert_present_with_cancellation_check(driver):
+                self._check_cancellation()
+                try:
+                    alert = driver.switch_to.alert
+                    return alert
+                except:
+                    return False
+            
+            alert = wait.until(alert_present_with_cancellation_check)
         except (TimeoutException, WebDriverException):
             logger.info("Registered!")
+            return True
+        except Exception:
+            # Check if cancelled
+            self._check_cancellation()
             return True
 
         try:
@@ -350,13 +423,14 @@ class SeleniumScraper:
             return False
 
         for course in courses:
+            self._check_cancellation()
             if self._is_cleaning_up:
                 return False
 
             loop = True
             while loop and not self._is_cleaning_up:
+                self._check_cancellation()
                 try:
-                    self._check_cancellation()
                     self._wait_for_element(
                         By.CSS_SELECTOR, "input[name=Register]",
                         timeout=WAIT_TIME_VERY_SHORT
@@ -384,6 +458,7 @@ class SeleniumScraper:
                     continue
 
                 try:
+                    self._check_cancellation()
                     register_btn.click()
                 except WebDriverException:
                     continue
@@ -398,17 +473,29 @@ class SeleniumScraper:
 
     def cleanup(self):
         """Clean up resources."""
+        # If already cleaning up, don't try again
+        if self._is_cleaning_up:
+            return
+            
         self._is_cleaning_up = True
-        if self.driver:
-            try:
-                self.driver.quit()
-            except WebDriverException as e:
-                # Log the error but don't raise it since this is cleanup
-                logger.warning(f"Error during WebDriver cleanup: {str(e)}")
-            except Exception as e:
-                # Catch any other unexpected errors during cleanup
-                logger.warning(f"Unexpected error during WebDriver cleanup: {str(e)}")
-            finally:
-                self.driver = None
-        self._is_cleaning_up = False
-        self.reset_cancellation()  # Reset cancellation token after cleanup
+        try:
+            # Copy the reference in case it gets nulled during cleanup
+            driver_ref = self.driver
+            if driver_ref:
+                try:
+                    # Set a page load timeout to prevent hanging
+                    driver_ref.set_page_load_timeout(5)
+                    driver_ref.quit()
+                except WebDriverException as e:
+                    # Log the error but don't raise it since this is cleanup
+                    logger.warning(f"Error during WebDriver cleanup: {str(e)}")
+                except Exception as e:
+                    # Catch any other unexpected errors during cleanup
+                    logger.warning(f"Unexpected error during WebDriver cleanup: {str(e)}")
+                finally:
+                    # Ensure driver is nulled even if an exception occurred
+                    self.driver = None
+        finally:
+            # Always ensure the cleanup flag is reset and cancellation token is cleared
+            self._is_cleaning_up = False
+            self.reset_cancellation()

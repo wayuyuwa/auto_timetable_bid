@@ -14,6 +14,7 @@ import os
 import csv
 from ..utils.timetable_reader import TimetableReader, Course
 from ..utils.logger import setup_logger
+from ..utils.config import BASE_DIR
 
 logger = setup_logger(__name__)
 
@@ -29,7 +30,9 @@ class CourseManager(QDialog):
         self.setMinimumSize(1000, 800)
         
         # Load existing courses
-        self.courses_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'courses.json')
+        app_data_dir = os.path.join(BASE_DIR, 'data')
+        os.makedirs(app_data_dir, exist_ok=True)
+        self.courses_file = os.path.join(app_data_dir, 'courses.json')
         self.courses = self._load_courses()
         
         # Track currently selected course for editing
@@ -45,9 +48,30 @@ class CourseManager(QDialog):
         import_group = QGroupBox("Import Courses")
         import_layout = QHBoxLayout()
         
-        self.import_path = QLineEdit()
+        # Create a custom QLineEdit that accepts drops
+        class DropLineEdit(QLineEdit):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self.setAcceptDrops(True)
+                
+            def dragEnterEvent(self, event):
+                if event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1:
+                    event.acceptProposedAction()
+                    
+            def dragMoveEvent(self, event):
+                if event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1:
+                    event.acceptProposedAction()
+                    
+            def dropEvent(self, event):
+                if event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1:
+                    file_path = event.mimeData().urls()[0].toLocalFile()
+                    self.setText(file_path)
+                    self.parent().parent()._process_imported_file(file_path)
+                    event.acceptProposedAction()
+        
+        self.import_path = DropLineEdit()
         self.import_path.setReadOnly(True)
-        self.import_path.setPlaceholderText("Select a file to import courses...")
+        self.import_path.setPlaceholderText("Drag & drop a TTAP/courses json file here or click Browse...")
         
         import_btn = QPushButton("Browse...")
         import_btn.clicked.connect(self._import_courses)
@@ -76,7 +100,7 @@ class CourseManager(QDialog):
         course_list_group = QGroupBox("Courses")
         course_list_layout = QVBoxLayout()
         
-        # Replace QListWidget with QTableWidget
+        # Course list table
         self.course_table = QTableWidget()
         self.course_table.setColumnCount(2)
         self.course_table.setHorizontalHeaderLabels(["Course Code", "Course Name"])
@@ -87,7 +111,53 @@ class CourseManager(QDialog):
         self.course_table.verticalHeader().setVisible(False)
         self.course_table.setAlternatingRowColors(True)
         self.course_table.cellClicked.connect(self._on_course_selected)
+        
+        # Add up/down buttons for reordering courses
+        course_buttons_layout = QHBoxLayout()
+        
+        self.move_up_button = QPushButton("Move Up")
+        self.move_up_button.clicked.connect(self._move_course_up)
+        self.move_up_button.setEnabled(False)
+        self.move_up_button.setStyleSheet("""
+            QPushButton {
+                background-color: #607D8B;
+                color: white;
+                border: none;
+                padding: 6px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #455A64;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        
+        self.move_down_button = QPushButton("Move Down")
+        self.move_down_button.clicked.connect(self._move_course_down)
+        self.move_down_button.setEnabled(False)
+        self.move_down_button.setStyleSheet("""
+            QPushButton {
+                background-color: #607D8B;
+                color: white;
+                border: none;
+                padding: 6px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #455A64;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        
+        course_buttons_layout.addWidget(self.move_up_button)
+        course_buttons_layout.addWidget(self.move_down_button)
+        
         course_list_layout.addWidget(self.course_table)
+        course_list_layout.addLayout(course_buttons_layout)
         
         course_list_group.setLayout(course_list_layout)
         content_layout.addWidget(course_list_group)
@@ -324,6 +394,8 @@ class CourseManager(QDialog):
         self._populate_course_details(self.selected_course)
         self.update_button.setEnabled(True)
         self.delete_button.setEnabled(True)
+        self.move_up_button.setEnabled(row > 0)
+        self.move_down_button.setEnabled(row < len(self.courses) - 1)
     
     def _populate_course_details(self, course):
         """Populate course details in the form."""
@@ -435,6 +507,36 @@ class CourseManager(QDialog):
         self.update_button.setEnabled(False)
         self.delete_button.setEnabled(False)
         self.add_button.setEnabled(True)
+        self.move_up_button.setEnabled(False)
+        self.move_down_button.setEnabled(False)
+    
+    def _move_course_up(self):
+        """Move the selected course up in the list."""
+        if not self.selected_course:
+            return
+        
+        index = self.courses.index(self.selected_course)
+        if index > 0:
+            self.courses[index], self.courses[index - 1] = self.courses[index - 1], self.courses[index]
+            self._populate_course_list()
+            self.course_table.selectRow(index - 1)
+            if index - 1 == 0:
+                self.move_up_button.setEnabled(False)
+            self.move_down_button.setEnabled(True)
+    
+    def _move_course_down(self):
+        """Move the selected course down in the list."""
+        if not self.selected_course:
+            return
+        
+        index = self.courses.index(self.selected_course)
+        if index < len(self.courses) - 1:
+            self.courses[index], self.courses[index + 1] = self.courses[index + 1], self.courses[index]
+            self._populate_course_list()
+            self.course_table.selectRow(index + 1)
+            if index + 1 == len(self.courses) - 1:
+                self.move_down_button.setEnabled(False)
+            self.move_up_button.setEnabled(True)
     
     def _import_courses(self):
         """Import courses from a file."""
@@ -467,6 +569,26 @@ class CourseManager(QDialog):
         except Exception as e:
             logger.error(f"Failed to import courses: {str(e)}")
             QMessageBox.warning(self, "Error", f"Failed to import courses: {str(e)}")
+    
+    def _process_imported_file(self, file_path):
+        """Process the imported file."""
+        try:
+            # Determine file type by extension
+            if file_path.lower().endswith('.json'):
+                # Import from JSON
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                    self.courses = [Course(**course) for course in data]
+            else:
+                # Default to timetable text file format
+                self.courses = TimetableReader.read_timetable(file_path)
+                
+            self._populate_course_list()
+            QMessageBox.information(self, "Success", "Courses imported successfully!")
+            
+        except Exception as e:
+            logger.error(f"Failed to process imported file: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Failed to process imported file: {str(e)}")
     
     def _load_courses(self) -> list[Course]:
         """Load courses from JSON file."""

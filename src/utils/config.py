@@ -11,6 +11,22 @@ from typing import Dict, List
 # Configure logging
 logger = logging.getLogger(__name__)
 
+def get_base_dir():
+    """
+    Get the base directory of the application.
+    
+    Returns:
+        str: The base directory path
+        - When running as executable: directory containing the executable
+        - When running as script: the project root directory
+    """
+    if getattr(sys, 'frozen', False):
+        # Running as a bundled executable
+        return os.path.dirname(sys.executable)
+    else:
+        # Running as a script
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def load_config() -> configparser.ConfigParser:
     """Load configuration from config.ini file."""
     config = configparser.ConfigParser()
@@ -46,14 +62,15 @@ def create_default_config() -> configparser.ConfigParser:
     """Create a default configuration when config.ini is missing."""
     config = configparser.ConfigParser()
     
+    base_url = 'https://unitreg.utar.edu.my/portal/courseRegStu'
     # Default URLs
     config['URLs'] = {
-        'base_url': 'https://unitreg.utar.edu.my',
-        'login_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/login.jsp',
-        'login_process_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/login_proc.jsp',
-        'registration_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/registration/registerUnitSurvey.jsp',
-        'home_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/mainpage.jsp',
-        'course_registration_url': 'https://unitreg.utar.edu.my/portal/courseRegStu/registration/registerCourse.jsp'
+        'base_url': f'{base_url}/',
+        'login_url': f'{base_url}/login.jsp',
+        'login_process_url': f'{base_url}/login_proc.jsp',
+        'registration_url': f'{base_url}/registration/registerUnitSurvey.jsp',
+        'home_url': f'{base_url}/mainpage.jsp',
+        'course_registration_url': f'{base_url}/registration/registerCourse.jsp'
     }
     
     # Default Headers
