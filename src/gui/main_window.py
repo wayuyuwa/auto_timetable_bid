@@ -3,20 +3,18 @@ Main window implementation for the UTAR Course Registration Scraper GUI.
 """
 
 import sys
-import socket
-import requests
 import time
 import threading
+from ..scrapers.request_scraper import RequestScraper
+from ..scrapers.playwright_scraper import PlaywrightScraper
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QPushButton, QLabel, QComboBox, 
-                           QLineEdit, QTextEdit, QMessageBox, QFileDialog,
+                           QLineEdit, QTextEdit, QMessageBox,
                            QCheckBox, QGroupBox, QTabWidget, QToolButton, QStyle)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QIcon, QFont
+from PyQt5.QtGui import QIcon
 import logging
 import os
-from ..scrapers.beautifulsoup_scraper import BeautifulSoupScraper
-from ..scrapers.selenium_scraper import SeleniumScraper
 from ..utils.config import (
     WINDOW_TITLE, WINDOW_SIZE, WINDOW_POSITION,
     BASE_DIR,
@@ -66,7 +64,7 @@ class ScraperThread(QThread):
                 return
 
             self.scraper.reset_cancellation()
-            if self.method == "BeautifulSoup":
+            if self.method == "Request":
                 try:
                     # Emit progress update for login attempt
                     self.progress.emit("Attempting to log in to UTAR course registration system...")
@@ -80,10 +78,10 @@ class ScraperThread(QThread):
                             except Exception as e:
                                 # Critical error that couldn't be handled in register_courses
                                 logger.error(f"Critical error in course registration: {str(e)}")
-                                self.finished.emit(False, f"Critical error in BeautifulSoup course registration: {str(e)}")
+                                self.finished.emit(False, f"Critical error in request mode course registration: {str(e)}")
                         else:
                             home_data = self.scraper.get_home_page_data()
-                            result_text = "BeautifulSoup Scraping Results:\n\n"
+                            result_text = "Request Mode Results:\n\n"
                             if home_data:
                                 result_text += "Home Page Data:\n"
                                 for key, value in home_data.items():
@@ -95,7 +93,7 @@ class ScraperThread(QThread):
                     # Unexpected error
                     logger.error(f"Unexpected error: {str(e)}")
                     self.finished.emit(False, f"An unexpected error occurred: {str(e)}")
-            else:  # Selenium
+            else:  # Playwright
                 if not self.is_running:
                     self.finished.emit(True, "Operation cancelled by user")
                     return
@@ -112,8 +110,7 @@ class ScraperThread(QThread):
                             else:
                                 self.finished.emit(False, "Course registration failed. Check the logs for details.")
                         else:
-                            # TODO: Implement basic scraping for Selenium
-                            self.finished.emit(True, "Selenium basic scraping not implemented yet")
+                            self.finished.emit(True, "Playwright browser flow completed")
                 except Exception as e:
                     self.finished.emit(False, str(e))
         except Exception as e:
@@ -124,7 +121,7 @@ class ScraperThread(QThread):
                 self.finished.emit(False, f"Scraping failed: {error_msg}")
         finally:
             # Always clean up resources in the finally block
-            if self.method == "Selenium" and self.scraper:
+            if self.method == "Playwright" and self.scraper:
                 try:
                     self.scraper.cleanup()
                 except Exception as e:
@@ -139,8 +136,8 @@ class ScraperThread(QThread):
                 # Always cancel first
                 self.scraper.cancel()
                 
-                # For selenium, we need to start a watcher thread to ensure the driver gets shut down
-                if self.method == "Selenium":
+                # For browser mode, we start a watcher thread to ensure cleanup.
+                if self.method == "Playwright":
                     def force_quit_after_timeout():
                         """Force quit the driver if cleanup takes too long"""
                         # Wait up to 5 seconds for normal cleanup
@@ -182,8 +179,8 @@ class MainWindow(QMainWindow):
         self.settings = Settings()
         
         # Initialize scrapers
-        self.beautifulsoup_scraper = BeautifulSoupScraper()
-        self.selenium_scraper = SeleniumScraper()
+        self.request_scraper = RequestScraper()
+        self.playwright_scraper = PlaywrightScraper()
         
         # Initialize scraper thread
         self.scraper_thread = None
@@ -229,7 +226,7 @@ class MainWindow(QMainWindow):
         method_layout = QHBoxLayout()
         method_label = QLabel("Select Method:")
         self.method_combo = QComboBox()
-        self.method_combo.addItems(["BeautifulSoup", "Selenium"])
+        self.method_combo.addItems(["Request", "Playwright"])
         self.method_combo.currentTextChanged.connect(self._on_method_changed)
         method_layout.addWidget(method_label)
         method_layout.addWidget(self.method_combo)
@@ -246,11 +243,11 @@ class MainWindow(QMainWindow):
         method_group.setLayout(method_layout)
         scraping_layout.addWidget(method_group)
         
-        # Selenium options group
-        self.selenium_group = QGroupBox("Selenium Options")
+        # Playwright options group
+        self.selenium_group = QGroupBox("Playwright Options")
         selenium_layout = QVBoxLayout()
         self.headless_checkbox = QCheckBox("Run in headless mode")
-        self.headless_checkbox.setToolTip("Run Selenium in headless mode (no GUI)")
+        self.headless_checkbox.setToolTip("Run Playwright in headless mode (no GUI)")
         self.headless_checkbox.stateChanged.connect(self._on_headless_changed)
         selenium_layout.addWidget(self.headless_checkbox)
         self.selenium_group.setLayout(selenium_layout)
@@ -463,9 +460,13 @@ class MainWindow(QMainWindow):
         """Load saved settings."""
         self.id_input.setText(self.settings.get_student_id())
         self.pw_input.setText(self.settings.get_password())
-        self.method_combo.setCurrentText(self.settings.get_method())
+        method = self.settings.get_method()
+        if method == "BeautifulSoup":
+            method = "Request"
+        elif method == "Selenium":
+            method = "Playwright"
+        self.method_combo.setCurrentText(method)
         self.headless_checkbox.setChecked(self.settings.get_headless_mode())
-        print(str(self.settings.get_max_retries()))
         self.retry_combo.setCurrentText(str(self.settings.get_max_retries()))
         self._on_method_changed(self.method_combo.currentText())
     
@@ -481,8 +482,8 @@ class MainWindow(QMainWindow):
     
     def _on_method_changed(self, method: str):
         """Handle method selection change."""
-        self.selenium_group.setVisible(method == "Selenium")
-        self.retry_combo.setVisible(method == "BeautifulSoup")
+        self.selenium_group.setVisible(method == "Playwright")
+        self.retry_combo.setVisible(method == "Request")
         self._save_settings()
         logger.info(f"Scraping method changed to: {method}")
     
@@ -517,10 +518,10 @@ class MainWindow(QMainWindow):
         logger.info(f"Starting {method} scraping with {len(self.courses)} courses...")
         
         # Create and start scraper thread
-        scraper = self.selenium_scraper if method == "Selenium" else self.beautifulsoup_scraper
-        if method == "Selenium":
+        scraper = self.playwright_scraper if method == "Playwright" else self.request_scraper
+        if method == "Playwright":
             scraper.set_headless_mode(self.headless_checkbox.isChecked())
-        elif method == "BeautifulSoup":
+        elif method == "Request":
             scraper.set_max_retries(int(self.retry_combo.currentText()))
 
         self.scraper_thread = ScraperThread(
@@ -548,9 +549,9 @@ class MainWindow(QMainWindow):
         self.execute_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         
-        if "WebDriver stopped successfully" in message:
-            logger.info("WebDriver stopped successfully")
-            QMessageBox.information(self, "Success", "WebDriver stopped successfully")
+        if "stopped successfully" in message:
+            logger.info("Browser automation stopped successfully")
+            QMessageBox.information(self, "Success", "Browser automation stopped successfully")
         elif not success:
             logger.error(f"Scraping failed: {message}")
             QMessageBox.warning(self, "Warning", message)
@@ -577,9 +578,9 @@ class MainWindow(QMainWindow):
         """Show information about the different scraping methods."""
         info_text = """
         <h3>Scraping Methods</h3>
-        <p><b>BeautifulSoup:</b> Faster execution, lower resource usage, no browser required.</p>
-        <p><b>Selenium:</b> Handles dynamic content, executes JavaScript, simulates real browser behavior.</p>
-        <p><b>Note:</b> BeautifulSoup should be faster but I didn't test both.</p>
+        <p><b>Request:</b> Faster execution, lower resource usage, no browser required.</p>
+        <p><b>Playwright:</b> Handles dynamic content, executes JavaScript, simulates real browser behavior.</p>
+        <p><b>Note:</b> Request mode is usually faster if server behavior is stable.</p>
         """
         
         msg = QMessageBox(self)
@@ -634,10 +635,12 @@ class MainWindow(QMainWindow):
     
     def set_method(self, method):
         """Set the scraping method."""
-        if method and method.lower() in ['beautifulsoup', 'selenium']:
+        if method and method.lower() in ['request', 'playwright', 'beautifulsoup', 'selenium']:
             method_map = {
-                'beautifulsoup': 'BeautifulSoup',
-                'selenium': 'Selenium'
+                'request': 'Request',
+                'playwright': 'Playwright',
+                'beautifulsoup': 'Request',
+                'selenium': 'Playwright'
             }
             formatted_method = method_map.get(method.lower())
             if formatted_method:

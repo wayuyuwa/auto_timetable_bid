@@ -15,6 +15,7 @@ import csv
 from ..utils.timetable_reader import TimetableReader, Course
 from ..utils.logger import setup_logger
 from ..utils.config import BASE_DIR
+from ..storage.database import Database, CourseRepository
 
 logger = setup_logger(__name__)
 
@@ -33,6 +34,8 @@ class CourseManager(QDialog):
         app_data_dir = os.path.join(BASE_DIR, 'data')
         os.makedirs(app_data_dir, exist_ok=True)
         self.courses_file = os.path.join(app_data_dir, 'courses.json')
+        self.course_repo = CourseRepository(Database())
+        self.course_repo.migrate_from_json(self.courses_file)
         self.courses = self._load_courses()
         
         # Track currently selected course for editing
@@ -591,23 +594,17 @@ class CourseManager(QDialog):
             QMessageBox.warning(self, "Error", f"Failed to process imported file: {str(e)}")
     
     def _load_courses(self) -> list[Course]:
-        """Load courses from JSON file."""
+        """Load courses from sqlite."""
         try:
-            os.makedirs(os.path.dirname(self.courses_file), exist_ok=True)
-            if os.path.exists(self.courses_file):
-                with open(self.courses_file, 'r') as f:
-                    data = json.load(f)
-                    return [Course(**course) for course in data]
-            return []
+            return self.course_repo.list_courses()
         except Exception as e:
             logger.error(f"Failed to load courses: {str(e)}")
             return []
     
     def _save_courses(self, show_message=True):
-        """Save courses to JSON file."""
+        """Save courses to sqlite."""
         try:
-            with open(self.courses_file, 'w') as f:
-                json.dump([course.__dict__ for course in self.courses], f, indent=4)
+            self.course_repo.replace_courses(self.courses)
             self.course_updated.emit(self.courses)
             if show_message:
                 QMessageBox.information(self, "Success", "Courses saved successfully!")

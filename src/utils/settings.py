@@ -1,10 +1,9 @@
-"""
-Settings manager for the UTAR Course Registration Scraper.
-"""
+"""Settings manager backed by sqlite storage."""
 
-import json
 import os
 from typing import Optional, Dict, Any
+
+from ..storage.database import Database, SettingsRepository
 
 class Settings:
     """Settings manager for the application."""
@@ -17,6 +16,9 @@ class Settings:
             settings_file (str): Path to the settings file
         """
         self.settings_file = settings_file
+        self.database = Database()
+        self.repo = SettingsRepository(self.database)
+        self.repo.migrate_from_json(self.settings_file)
         self.settings = self._load_settings()
     
     def _load_settings(self) -> Dict[str, Any]:
@@ -26,13 +28,10 @@ class Settings:
         Returns:
             Dict[str, Any]: Settings dictionary
         """
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, 'r') as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                return self._get_default_settings()
-        return self._get_default_settings()
+        loaded = self.repo.load_settings()
+        default = self._get_default_settings()
+        default.update(loaded)
+        return default
     
     def _get_default_settings(self) -> Dict[str, Any]:
         """
@@ -44,14 +43,13 @@ class Settings:
         return {
             'student_id': '',
             'password': '',
-            'method': 'BeautifulSoup',
+            'method': 'Request',
             'headless_mode': False
         }
     
     def save_settings(self):
         """Save settings to file."""
-        with open(self.settings_file, 'w') as f:
-            json.dump(self.settings, f, indent=4)
+        self.repo.save_settings(self.settings)
     
     def get_student_id(self) -> str:
         """
@@ -87,7 +85,7 @@ class Settings:
         Returns:
             str: Last used method
         """
-        return self.settings.get('method', 'Selenium')
+        return self.settings.get('method', 'Playwright')
     
     def get_headless_mode(self) -> bool:
         """

@@ -3,24 +3,17 @@ CAPTCHA solving utility using ddddocr.
 """
 
 import ddddocr
-from PIL import Image
 import logging
-import time
-import requests.exceptions
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-# Fix for newer PIL versions
-if not hasattr(Image, 'ANTIALIAS'):
-    setattr(Image, 'ANTIALIAS', Image.LANCZOS)
 
 class CaptchaSolver:
     """CAPTCHA solver using ddddocr."""
     
     def __init__(self):
         """Initialize the OCR engine."""
-        self.ocr = ddddocr.DdddOcr()
+        self.ocr = ddddocr.DdddOcr(show_ad=False)
     
     def solve(self, image: bytes) -> str:
         """

@@ -6,7 +6,6 @@ import configparser
 import os
 import sys
 import logging
-from typing import Dict, List
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -79,9 +78,17 @@ def create_default_config() -> configparser.ConfigParser:
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9'
     }
     
-    # Default Selenium Settings
+    # Default Playwright Settings
+    config['Playwright'] = {
+        'options': '--disable-gpu,--no-sandbox,--disable-dev-shm-usage',
+        'wait_time_very_short': '1',
+        'wait_time_short': '3',
+        'wait_time_long': '10'
+    }
+
+    # Backward compatibility section
     config['Selenium'] = {
-        'options': 'disable-gpu,no-sandbox,disable-dev-shm-usage',
+        'options': '--disable-gpu,--no-sandbox,--disable-dev-shm-usage',
         'wait_time_very_short': '1',
         'wait_time_short': '3',
         'wait_time_long': '10'
@@ -99,6 +106,10 @@ def create_default_config() -> configparser.ConfigParser:
     config['Logging'] = {
         'level': 'INFO',
         'format': '%%(asctime)s - %%(name)s - %%(levelname)s - %%(message)s'
+    }
+
+    config['Storage'] = {
+        'sqlite_db_path': 'data/app.db'
     }
     
     return config
@@ -120,11 +131,15 @@ DEFAULT_HEADERS = {
     'Accept': config['Headers']['accept']
 }
 
-# Selenium Settings
-SELENIUM_OPTIONS = config['Selenium']['options'].split(',')
-WAIT_TIME_VERY_SHORT = float(config['Selenium']['wait_time_very_short'])
-WAIT_TIME_SHORT = float(config['Selenium']['wait_time_short'])
-WAIT_TIME_LONG = float(config['Selenium']['wait_time_long'])
+# Browser automation settings (Playwright first, Selenium section as fallback)
+_browser_section = 'Playwright' if config.has_section('Playwright') else 'Selenium'
+PLAYWRIGHT_OPTIONS = config[_browser_section]['options'].split(',')
+WAIT_TIME_VERY_SHORT = float(config[_browser_section]['wait_time_very_short'])
+WAIT_TIME_SHORT = float(config[_browser_section]['wait_time_short'])
+WAIT_TIME_LONG = float(config[_browser_section]['wait_time_long'])
+
+# Backward compatibility constant used by legacy modules.
+SELENIUM_OPTIONS = PLAYWRIGHT_OPTIONS
 
 # GUI Settings
 WINDOW_TITLE = config['GUI']['window_title']
@@ -137,10 +152,6 @@ WINDOW_POSITION = (
     int(config['GUI']['window_y'])
 )
 
-# Logging
-LOG_LEVEL = config['Logging']['level']
-LOG_FORMAT = config['Logging']['format']
-
 # Determine the base directory for logs
 if getattr(sys, 'frozen', False):
     # Running as a bundled executable
@@ -152,6 +163,14 @@ else:
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'scraper.log')
 ERROR_LOG_FILE = os.path.join(LOG_DIR, 'error.log')
+
+# Storage
+_sqlite_db_raw = config['Storage']['sqlite_db_path'] if config.has_section('Storage') else 'data/app.db'
+SQLITE_DB_PATH = _sqlite_db_raw if os.path.isabs(_sqlite_db_raw) else os.path.join(BASE_DIR, _sqlite_db_raw)
+
+# Logging
+LOG_LEVEL = config['Logging']['level']
+LOG_FORMAT = config['Logging']['format']
 
 # Create logs directory if it doesn't exist
 os.makedirs(LOG_DIR, exist_ok=True)

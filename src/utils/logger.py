@@ -1,96 +1,100 @@
-"""
-Logging configuration for the UTAR Course Registration Scraper.
-"""
+"""Logging utilities with structured context support."""
 
+import contextvars
 import logging
 import logging.handlers
-import os
 import sys
 import traceback
-from .config import LOG_LEVEL, LOG_FORMAT, LOG_FILE, ERROR_LOG_FILE
+import uuid
 
-def setup_logger(name: str) -> logging.Logger:
-    """
-    Set up a logger with file and console handlers.
-    
-    Args:
-        name (str): Name of the logger
-        
-    Returns:
-        logging.Logger: Configured logger instance
-    """
-    logger = logging.getLogger(name)
-    logger.setLevel(LOG_LEVEL)
-    
-    # Create formatters
-    formatter = logging.Formatter(LOG_FORMAT)
-    
-    # Create and configure file handler for all logs
+from .config import ERROR_LOG_FILE, LOG_FILE, LOG_LEVEL
+
+_configured = False
+_run_id = uuid.uuid4().hex[:8]
+_task_context = contextvars.ContextVar("task_context", default="main")
+
+
+class ContextFilter(logging.Filter):
+    """Inject stable context fields into every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.run_id = _run_id
+        record.task = _task_context.get()
+        return True
+
+
+def _configure_root_logger() -> None:
+    global _configured
+    if _configured:
+        return
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, str(LOG_LEVEL).upper(), logging.INFO))
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | run=%(run_id)s task=%(task)s | %(message)s"
+    )
+
     file_handler = logging.handlers.RotatingFileHandler(
         LOG_FILE,
-        maxBytes=5*1024*1024,  # 5MB
+        maxBytes=5 * 1024 * 1024,
         backupCount=5,
-        encoding='utf-8'
+        encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
-    file_handler.setLevel(LOG_LEVEL)
-    
-    # Create and configure error file handler
+
     error_handler = logging.handlers.RotatingFileHandler(
         ERROR_LOG_FILE,
-        maxBytes=5*1024*1024,  # 5MB
+        maxBytes=5 * 1024 * 1024,
         backupCount=5,
-        encoding='utf-8'
+        encoding="utf-8",
     )
-    error_handler.setFormatter(formatter)
     error_handler.setLevel(logging.ERROR)
-    
-    # Create and configure console handler
+    error_handler.setFormatter(formatter)
+
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
-    console_handler.setLevel(LOG_LEVEL)
-    # Add handlers to logger
-    logger.addHandler(file_handler)
-    logger.addHandler(error_handler)
-    logger.addHandler(console_handler)
-    
-    return logger
+
+    context_filter = ContextFilter()
+    file_handler.addFilter(context_filter)
+    error_handler.addFilter(context_filter)
+    console_handler.addFilter(context_filter)
+
+    root_logger.handlers = []
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(error_handler)
+    root_logger.addHandler(console_handler)
+    _configured = True
+
+
+def setup_logger(name: str) -> logging.Logger:
+    """Return a configured namespaced logger."""
+    _configure_root_logger()
+    return logging.getLogger(name)
+
+
+def set_log_context(task_name: str) -> contextvars.Token:
+    """Set thread/task-local logging context label."""
+    return _task_context.set(task_name)
+
+
+def reset_log_context(token: contextvars.Token) -> None:
+    """Reset thread/task-local logging context label."""
+    _task_context.reset(token)
+
 
 def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
-    """
-    Handle uncaught exceptions by logging them before the application crashes.
-    
-    Args:
-        exc_type: Exception type
-        exc_value: Exception value
-        exc_traceback: Exception traceback
-    """
     if issubclass(exc_type, KeyboardInterrupt):
-        # Don't handle KeyboardInterrupt specially
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
-    
-    # Get the logger
-    crash_logger = logging.getLogger('crash_logger')
-    
-    # Format the exception info
-    exception_info = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-    
-    # Log the exception with the full traceback
+
+    crash_logger = logging.getLogger("crash_logger")
+    exception_info = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
     crash_logger.critical(f"APPLICATION CRASH DETECTED:\n{exception_info}")
-    
-    # Call the original exception hook
     sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
+
 def setup_crash_logging():
-    """
-    Set up crash logging by installing a global exception hook.
-    This will catch and log all uncaught exceptions.
-    """
-    # Create a dedicated logger for crashes
-    crash_logger = setup_logger('crash_logger')
-    
-    # Set up the global exception hook
+    crash_logger = setup_logger("crash_logger")
     sys.excepthook = handle_uncaught_exception
-    
     return crash_logger
