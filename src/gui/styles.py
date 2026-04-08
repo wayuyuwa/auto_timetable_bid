@@ -20,12 +20,6 @@ QLabel#sidebarTitle {
     font-weight: 700;
 }
 
-QLabel#sidebarHint,
-QLabel#sidebarFooter {
-    color: #b6c9dd;
-    font-size: 12px;
-}
-
 QFrame#mainArea,
 QFrame#titleCard,
 QFrame#footerActions {
@@ -61,6 +55,7 @@ QGroupBox::title {
     padding: 0 6px;
 }
 
+/* Button Base Styles */
 QPushButton {
     border: none;
     border-radius: 8px;
@@ -69,20 +64,11 @@ QPushButton {
     background-color: #2b7dbd;
     color: #ffffff;
 }
+QPushButton:hover { background-color: #256aa0; }
+QPushButton:pressed { background-color: #1f5a87; }
+QPushButton:disabled { background-color: #bcc8d6; color: #666666; }
 
-QPushButton:hover {
-    background-color: #256aa0;
-}
-
-QPushButton:pressed {
-    background-color: #1f5a87;
-}
-
-QPushButton:disabled {
-    background-color: #bcc8d6;
-    color: #eef3f8;
-}
-
+/* Sidebar Navigation */
 QPushButton#btn_login,
 QPushButton#btn_courses,
 QPushButton#btn_config {
@@ -93,13 +79,9 @@ QPushButton#btn_config {
     color: #dce9f7;
     border: 1px solid #214d76;
 }
-
 QPushButton#btn_login:hover,
 QPushButton#btn_courses:hover,
-QPushButton#btn_config:hover {
-    background-color: #1c446a;
-}
-
+QPushButton#btn_config:hover { background-color: #1c446a; }
 QPushButton#btn_login:checked,
 QPushButton#btn_courses:checked,
 QPushButton#btn_config:checked {
@@ -108,22 +90,23 @@ QPushButton#btn_config:checked {
     color: #ffffff;
 }
 
-QPushButton#btn_start {
-    background-color: #2f9d5c;
-}
+/* Execution Actions */
+QPushButton#btn_start { background-color: #2f9d5c; }
+QPushButton#btn_start:hover { background-color: #27844d; }
+QPushButton#btn_stop { background-color: #d14a3f; }
+QPushButton#btn_stop:hover { background-color: #b83f36; }
 
-QPushButton#btn_start:hover {
-    background-color: #27844d;
-}
+/* Course Manager Actions */
+QPushButton#btn_add_course { background-color: #4CAF50; }
+QPushButton#btn_add_course:hover { background-color: #45a049; }
+QPushButton#btn_update_course, QPushButton#btn_import_course { background-color: #2196F3; }
+QPushButton#btn_update_course:hover, QPushButton#btn_import_course:hover { background-color: #1976D2; }
+QPushButton#btn_delete_course { background-color: #f44336; }
+QPushButton#btn_delete_course:hover { background-color: #d32f2f; }
+QPushButton#btn_clear_course, QPushButton#btn_move_up, QPushButton#btn_move_down { background-color: #607D8B; }
+QPushButton#btn_clear_course:hover, QPushButton#btn_move_up:hover, QPushButton#btn_move_down:hover { background-color: #455A64; }
 
-QPushButton#btn_stop {
-    background-color: #d14a3f;
-}
-
-QPushButton#btn_stop:hover {
-    background-color: #b83f36;
-}
-
+/* Inputs and Selectors */
 QLineEdit,
 QTextEdit,
 QComboBox,
@@ -145,11 +128,27 @@ QRadioButton,
 QCheckBox {
     spacing: 8px;
 }
+
+/* Table Design */
+QTableWidget {
+    border: 1px solid #c7d2de;
+    border-radius: 8px;
+    background-color: #ffffff;
+    gridline-color: #e5e7eb;
+}
+QTableWidget::item { padding: 6px; }
+QTableWidget::item:selected { background-color: #e3f2fd; color: #1d3557; }
+QTableWidget:focus { outline: none; }
+QHeaderView::section {
+    background-color: #f2f4f8;
+    padding: 6px;
+    border: 1px solid #c7d2de;
+    font-weight: 700;
+}
 """
 
-
-def apply_stylesheet(window, font_size=13):
+def apply_stylesheet(window, font_size=16):
     """Apply the shared application stylesheet to a Qt window."""
-    size = int(font_size) if font_size else 13
+    size = int(font_size) if font_size else 16
     stylesheet = APP_STYLE.replace("font-size: 13px;", f"font-size: {size}px;", 1)
     window.setStyleSheet(stylesheet)

@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1040</width>
-    <height>640</height>
+    <width>1140</width>
+    <height>760</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -15,196 +15,91 @@
   </property>
   <widget class="QWidget" name="centralwidget">
    <layout class="QHBoxLayout" name="horizontalLayout">
-    <property name="spacing">
-     <number>12</number>
-    </property>
-    <property name="leftMargin">
-     <number>14</number>
-    </property>
-    <property name="topMargin">
-     <number>14</number>
-    </property>
-    <property name="rightMargin">
-     <number>14</number>
-    </property>
-    <property name="bottomMargin">
-     <number>14</number>
-    </property>
+    <property name="spacing"><number>12</number></property>
+    <property name="leftMargin"><number>14</number></property>
+    <property name="topMargin"><number>14</number></property>
+    <property name="rightMargin"><number>14</number></property>
+    <property name="bottomMargin"><number>14</number></property>
     <item>
      <widget class="QFrame" name="sidebar">
       <property name="minimumSize">
-       <size>
-        <width>220</width>
-        <height>0</height>
-       </size>
+       <size><width>220</width><height>0</height></size>
       </property>
       <property name="maximumSize">
-       <size>
-        <width>260</width>
-        <height>16777215</height>
-       </size>
+       <size><width>260</width><height>16777215</height></size>
       </property>
-      <property name="frameShape">
-       <enum>QFrame::StyledPanel</enum>
-      </property>
+      <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
       <layout class="QVBoxLayout" name="verticalLayout_sidebar">
-       <property name="spacing">
-        <number>10</number>
-       </property>
-       <property name="leftMargin">
-        <number>14</number>
-       </property>
-       <property name="topMargin">
-        <number>14</number>
-       </property>
-       <property name="rightMargin">
-        <number>14</number>
-       </property>
-       <property name="bottomMargin">
-        <number>14</number>
-       </property>
+       <property name="spacing"><number>10</number></property>
+       <property name="leftMargin"><number>14</number></property>
+       <property name="topMargin"><number>14</number></property>
+       <property name="rightMargin"><number>14</number></property>
+       <property name="bottomMargin"><number>14</number></property>
        <item>
         <widget class="QLabel" name="sidebarTitle">
-         <property name="text">
-          <string>Course Registration</string>
-         </property>
-         <property name="wordWrap">
-          <bool>true</bool>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <widget class="QLabel" name="sidebarHint">
-         <property name="text">
-          <string>Move from top to bottom to complete setup.</string>
-         </property>
-         <property name="wordWrap">
-          <bool>true</bool>
-         </property>
+         <property name="text"><string>Course Registration</string></property>
+         <property name="wordWrap"><bool>true</bool></property>
         </widget>
        </item>
        <item>
         <widget class="QPushButton" name="btn_login">
-         <property name="text">
-          <string>1. Login</string>
-         </property>
-         <property name="checkable">
-          <bool>true</bool>
-         </property>
-         <property name="checked">
-          <bool>true</bool>
-         </property>
-         <property name="autoExclusive">
-          <bool>true</bool>
-         </property>
+         <property name="text"><string>1. Login</string></property>
+         <property name="checkable"><bool>true</bool></property>
+         <property name="checked"><bool>true</bool></property>
+         <property name="autoExclusive"><bool>true</bool></property>
         </widget>
        </item>
        <item>
         <widget class="QPushButton" name="btn_courses">
-         <property name="text">
-          <string>2. Courses</string>
-         </property>
-         <property name="checkable">
-          <bool>true</bool>
-         </property>
-         <property name="autoExclusive">
-          <bool>true</bool>
-         </property>
+         <property name="text"><string>2. Courses</string></property>
+         <property name="checkable"><bool>true</bool></property>
+         <property name="autoExclusive"><bool>true</bool></property>
         </widget>
        </item>
        <item>
         <widget class="QPushButton" name="btn_config">
-         <property name="text">
-          <string>3. Configuration</string>
-         </property>
-         <property name="checkable">
-          <bool>true</bool>
-         </property>
-         <property name="autoExclusive">
-          <bool>true</bool>
-         </property>
+         <property name="text"><string>3. Settings</string></property>
+         <property name="checkable"><bool>true</bool></property>
+         <property name="autoExclusive"><bool>true</bool></property>
         </widget>
        </item>
        <item>
         <spacer name="verticalSpacer">
-         <property name="orientation">
-          <enum>Qt::Vertical</enum>
-         </property>
+         <property name="orientation"><enum>Qt::Vertical</enum></property>
          <property name="sizeHint" stdset="0">
-          <size>
-           <width>20</width>
-           <height>40</height>
-          </size>
+          <size><width>20</width><height>40</height></size>
          </property>
         </spacer>
-       </item>
-       <item>
-        <widget class="QLabel" name="sidebarFooter">
-         <property name="text">
-          <string>Tip: Keep this app open while registration is running.</string>
-         </property>
-         <property name="wordWrap">
-          <bool>true</bool>
-         </property>
-        </widget>
        </item>
       </layout>
      </widget>
     </item>
     <item>
      <widget class="QFrame" name="mainArea">
-      <property name="frameShape">
-       <enum>QFrame::StyledPanel</enum>
-      </property>
+      <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
       <layout class="QVBoxLayout" name="verticalLayout_mainArea">
-       <property name="spacing">
-        <number>12</number>
-       </property>
-       <property name="leftMargin">
-        <number>12</number>
-       </property>
-       <property name="topMargin">
-        <number>12</number>
-       </property>
-       <property name="rightMargin">
-        <number>12</number>
-       </property>
-       <property name="bottomMargin">
-        <number>12</number>
-       </property>
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>12</number></property>
+       <property name="topMargin"><number>12</number></property>
+       <property name="rightMargin"><number>12</number></property>
+       <property name="bottomMargin"><number>12</number></property>
        <item>
         <widget class="QFrame" name="titleCard">
-         <property name="frameShape">
-          <enum>QFrame::StyledPanel</enum>
-         </property>
+         <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
          <layout class="QVBoxLayout" name="verticalLayout_titleCard">
-          <property name="leftMargin">
-           <number>12</number>
-          </property>
-          <property name="topMargin">
-           <number>10</number>
-          </property>
-          <property name="rightMargin">
-           <number>12</number>
-          </property>
-          <property name="bottomMargin">
-           <number>10</number>
-          </property>
+          <property name="leftMargin"><number>12</number></property>
+          <property name="topMargin"><number>10</number></property>
+          <property name="rightMargin"><number>12</number></property>
+          <property name="bottomMargin"><number>10</number></property>
           <item>
            <widget class="QLabel" name="pageTitle">
-            <property name="text">
-             <string>Setup and Run Course Bidding</string>
-            </property>
+            <property name="text"><string>Setup and Run Course Bidding</string></property>
            </widget>
           </item>
           <item>
            <widget class="QLabel" name="pageSubtitle">
-            <property name="text">
-             <string>Use the left navigation to complete login, paste courses, configure mode, then run.</string>
-            </property>
-            <property name="wordWrap">
-             <bool>true</bool>
-            </property>
+            <property name="text"><string>Use the left navigation to complete login, manage courses, configure mode, then run.</string></property>
+            <property name="wordWrap"><bool>true</bool></property>
            </widget>
           </item>
          </layout>
@@ -214,66 +109,31 @@
         <widget class="QStackedWidget" name="stackedWidget">
          <widget class="QWidget" name="page_login">
           <layout class="QVBoxLayout" name="verticalLayout_loginPage">
-           <property name="spacing">
-            <number>12</number>
-           </property>
+           <property name="spacing"><number>12</number></property>
            <item>
             <widget class="QGroupBox" name="group_credentials">
-             <property name="title">
-              <string>Account Credentials</string>
-             </property>
+             <property name="title"><string>Account Credentials</string></property>
              <layout class="QFormLayout" name="formLayout_login">
-              <property name="labelAlignment">
-               <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-              </property>
+              <property name="labelAlignment"><set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set></property>
               <item row="0" column="0">
                <widget class="QLabel" name="label_student_id">
-                <property name="text">
-                 <string>Student ID</string>
-                </property>
+                <property name="text"><string>Student ID</string></property>
                </widget>
               </item>
               <item row="0" column="1">
                <widget class="QLineEdit" name="input_student_id">
-                <property name="placeholderText">
-                 <string>e.g. 2101234</string>
-                </property>
+                <property name="placeholderText"><string>e.g. 2101234</string></property>
                </widget>
               </item>
               <item row="1" column="0">
                <widget class="QLabel" name="label_password">
-                <property name="text">
-                 <string>Password</string>
-                </property>
+                <property name="text"><string>Password</string></property>
                </widget>
               </item>
               <item row="1" column="1">
                <widget class="QLineEdit" name="input_password">
-                <property name="echoMode">
-                 <enum>QLineEdit::Password</enum>
-                </property>
-                <property name="placeholderText">
-                 <string>Enter your portal password</string>
-                </property>
-               </widget>
-              </item>
-             </layout>
-            </widget>
-           </item>
-           <item>
-            <widget class="QGroupBox" name="group_login_notes">
-             <property name="title">
-              <string>Notes</string>
-             </property>
-             <layout class="QVBoxLayout" name="verticalLayout_login_notes">
-              <item>
-               <widget class="QLabel" name="label_login_note">
-                <property name="text">
-                 <string>Your credentials are used only for the registration session. Make sure your internet connection is stable before starting.</string>
-                </property>
-                <property name="wordWrap">
-                 <bool>true</bool>
-                </property>
+                <property name="echoMode"><enum>QLineEdit::Password</enum></property>
+                <property name="placeholderText"><string>Enter your portal password</string></property>
                </widget>
               </item>
              </layout>
@@ -281,14 +141,9 @@
            </item>
            <item>
             <spacer name="verticalSpacer_login">
-             <property name="orientation">
-              <enum>Qt::Vertical</enum>
-             </property>
+             <property name="orientation"><enum>Qt::Vertical</enum></property>
              <property name="sizeHint" stdset="0">
-              <size>
-               <width>20</width>
-               <height>40</height>
-              </size>
+              <size><width>20</width><height>40</height></size>
              </property>
             </spacer>
            </item>
@@ -296,135 +151,29 @@
          </widget>
          <widget class="QWidget" name="page_courses">
           <layout class="QVBoxLayout" name="verticalLayout_coursesPage">
-           <property name="spacing">
-            <number>12</number>
-           </property>
-           <item>
-            <widget class="QGroupBox" name="group_course_input">
-             <property name="title">
-                            <string>Courses</string>
-             </property>
-             <layout class="QVBoxLayout" name="verticalLayout_course_input">
-              <item>
-               <widget class="QLabel" name="label_courses_help">
-                <property name="text">
-                                 <string>Manage courses in Course Manager. Priority order follows the saved list.</string>
-                </property>
-               </widget>
-              </item>
-              <item>
-                             <widget class="QTableWidget" name="courses_table">
-                                <property name="minimumSize">
-                                 <size>
-                                    <width>0</width>
-                                    <height>230</height>
-                                 </size>
-                                </property>
-                                <property name="selectionMode">
-                                 <enum>QAbstractItemView::SingleSelection</enum>
-                                </property>
-                                <property name="selectionBehavior">
-                                 <enum>QAbstractItemView::SelectRows</enum>
-                                </property>
-                                <property name="editTriggers">
-                                 <set>QAbstractItemView::NoEditTriggers</set>
-                                </property>
-                                <property name="alternatingRowColors">
-                                 <bool>true</bool>
-                                </property>
-                                <column>
-                                 <property name="text">
-                                    <string>Course Code</string>
-                                 </property>
-                                </column>
-                                <column>
-                                 <property name="text">
-                                    <string>Course Name</string>
-                                 </property>
-                                </column>
-                             </widget>
-                            </item>
-                            <item>
-                             <layout class="QHBoxLayout" name="horizontalLayout_courses_actions">
-                                <item>
-                                 <widget class="QPushButton" name="btn_manage_courses">
-                                    <property name="text">
-                                     <string>Open Course Manager</string>
-                                    </property>
-                                 </widget>
-                                </item>
-                                <item>
-                                 <spacer name="horizontalSpacer_courses_actions">
-                                    <property name="orientation">
-                                     <enum>Qt::Horizontal</enum>
-                                    </property>
-                                    <property name="sizeHint" stdset="0">
-                                     <size>
-                                        <width>40</width>
-                                        <height>20</height>
-                                     </size>
-                                    </property>
-                                 </spacer>
-                                </item>
-                             </layout>
-              </item>
-             </layout>
-            </widget>
-           </item>
-           <item>
-            <widget class="QGroupBox" name="group_course_notes">
-             <property name="title">
-              <string>Tips</string>
-             </property>
-             <layout class="QVBoxLayout" name="verticalLayout_course_notes">
-              <item>
-               <widget class="QLabel" name="label_course_note">
-                <property name="text">
-                 <string>Place high-priority courses first. Keep the list short for faster processing.</string>
-                </property>
-                <property name="wordWrap">
-                 <bool>true</bool>
-                </property>
-               </widget>
-              </item>
-             </layout>
-            </widget>
-           </item>
-          </layout>
+           <property name="spacing"><number>0</number></property>
+           <property name="leftMargin"><number>0</number></property>
+           <property name="topMargin"><number>0</number></property>
+           <property name="rightMargin"><number>0</number></property>
+           <property name="bottomMargin"><number>0</number></property>
+           </layout>
          </widget>
          <widget class="QWidget" name="page_config">
           <layout class="QVBoxLayout" name="verticalLayout_configPage">
-           <property name="spacing">
-            <number>12</number>
-           </property>
+           <property name="spacing"><number>12</number></property>
            <item>
             <widget class="QGroupBox" name="group_engine">
-             <property name="title">
-              <string>Engine Selection</string>
-             </property>
+             <property name="title"><string>Engine Selection</string></property>
              <layout class="QVBoxLayout" name="verticalLayout_engine">
               <item>
                <widget class="QRadioButton" name="radio_bs4">
-                <property name="text">
-                 <string>Request (BeautifulSoup)</string>
-                </property>
-                <property name="checked">
-                 <bool>true</bool>
-                </property>
+                <property name="text"><string>Request (BeautifulSoup)</string></property>
+                <property name="checked"><bool>true</bool></property>
                </widget>
               </item>
               <item>
                <widget class="QRadioButton" name="radio_playwright">
-                <property name="text">
-                 <string>Playwright (Recommended for dynamic pages)</string>
-                </property>
-               </widget>
-              </item>
-              <item>
-               <widget class="QRadioButton" name="radio_selenium">
-                <property name="text">
-                 <string>Selenium (Compatibility mode)</string>
-                </property>
+                <property name="text"><string>Playwright (Recommended for dynamic pages)</string></property>
                </widget>
               </item>
              </layout>
@@ -432,76 +181,54 @@
            </item>
            <item>
             <widget class="QGroupBox" name="group_extra">
-             <property name="title">
-              <string>Execution Options</string>
-             </property>
+             <property name="title"><string>Execution Options</string></property>
              <layout class="QFormLayout" name="formLayout_extra">
               <item row="0" column="0" colspan="2">
                <widget class="QCheckBox" name="check_headless">
-                <property name="text">
-                 <string>Run browser in headless mode</string>
-                </property>
+                <property name="text"><string>Run browser in headless mode</string></property>
                </widget>
               </item>
               <item row="1" column="0">
                <widget class="QLabel" name="label_timeout">
-                <property name="text">
-                 <string>Timeout</string>
-                </property>
+                <property name="text"><string>Timeout</string></property>
                </widget>
               </item>
               <item row="1" column="1">
                <widget class="QSpinBox" name="timeout">
-                <property name="minimum">
-                 <number>5</number>
-                </property>
-                <property name="maximum">
-                 <number>120</number>
-                </property>
-                <property name="value">
-                 <number>30</number>
-                </property>
-                <property name="suffix">
-                 <string> sec</string>
-                </property>
+                <property name="minimum"><number>5</number></property>
+                <property name="maximum"><number>120</number></property>
+                <property name="value"><number>30</number></property>
+                <property name="suffix"><string> sec</string></property>
                </widget>
               </item>
-                            <item row="2" column="0">
-                             <widget class="QLabel" name="label_font_size">
-                                <property name="text">
-                                 <string>Font Size</string>
-                                </property>
-                             </widget>
-                            </item>
-                            <item row="2" column="1">
-                             <widget class="QSpinBox" name="spin_font_size">
-                                <property name="minimum">
-                                 <number>10</number>
-                                </property>
-                                <property name="maximum">
-                                 <number>20</number>
-                                </property>
-                                <property name="value">
-                                 <number>13</number>
-                                </property>
-                                <property name="suffix">
-                                 <string> px</string>
-                                </property>
-                             </widget>
-                            </item>
+             </layout>
+            </widget>
+           </item>
+           <item>
+            <widget class="QGroupBox" name="group_app_settings">
+             <property name="title"><string>App Settings</string></property>
+             <layout class="QFormLayout" name="formLayout_app_settings">
+              <item row="0" column="0">
+               <widget class="QLabel" name="label_font_size">
+                <property name="text"><string>Font Size</string></property>
+               </widget>
+              </item>
+              <item row="0" column="1">
+               <widget class="QSpinBox" name="spin_font_size">
+                <property name="minimum"><number>10</number></property>
+                <property name="maximum"><number>20</number></property>
+                <property name="value"><number>16</number></property>
+                <property name="suffix"><string> px</string></property>
+               </widget>
+              </item>
              </layout>
             </widget>
            </item>
            <item>
             <spacer name="verticalSpacer_config">
-             <property name="orientation">
-              <enum>Qt::Vertical</enum>
-             </property>
+             <property name="orientation"><enum>Qt::Vertical</enum></property>
              <property name="sizeHint" stdset="0">
-              <size>
-               <width>20</width>
-               <height>40</height>
-              </size>
+              <size><width>20</width><height>40</height></size>
              </property>
             </spacer>
            </item>
@@ -511,59 +238,30 @@
        </item>
        <item>
         <widget class="QFrame" name="footerActions">
-         <property name="frameShape">
-          <enum>QFrame::StyledPanel</enum>
-         </property>
+         <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
          <layout class="QHBoxLayout" name="horizontalLayout_actions">
-          <property name="leftMargin">
-           <number>10</number>
-          </property>
-          <property name="topMargin">
-           <number>8</number>
-          </property>
-          <property name="rightMargin">
-           <number>10</number>
-          </property>
-          <property name="bottomMargin">
-           <number>8</number>
-          </property>
+          <property name="leftMargin"><number>10</number></property>
+          <property name="topMargin"><number>8</number></property>
+          <property name="rightMargin"><number>10</number></property>
+          <property name="bottomMargin"><number>8</number></property>
           <item>
            <spacer name="horizontalSpacer_actions">
-            <property name="orientation">
-             <enum>Qt::Horizontal</enum>
-            </property>
+            <property name="orientation"><enum>Qt::Horizontal</enum></property>
             <property name="sizeHint" stdset="0">
-             <size>
-              <width>40</width>
-              <height>20</height>
-             </size>
+             <size><width>40</width><height>20</height></size>
             </property>
            </spacer>
           </item>
           <item>
            <widget class="QPushButton" name="btn_start">
-            <property name="minimumSize">
-             <size>
-              <width>130</width>
-              <height>36</height>
-             </size>
-            </property>
-            <property name="text">
-             <string>Start</string>
-            </property>
+            <property name="minimumSize"><size><width>130</width><height>36</height></size></property>
+            <property name="text"><string>Start</string></property>
            </widget>
           </item>
           <item>
            <widget class="QPushButton" name="btn_stop">
-            <property name="minimumSize">
-             <size>
-              <width>130</width>
-              <height>36</height>
-             </size>
-            </property>
-            <property name="text">
-             <string>Stop</string>
-            </property>
+            <property name="minimumSize"><size><width>130</width><height>36</height></size></property>
+            <property name="text"><string>Stop</string></property>
            </widget>
           </item>
          </layout>

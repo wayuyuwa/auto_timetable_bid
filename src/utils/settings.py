@@ -45,7 +45,7 @@ class Settings:
             'password': '',
             'method': 'Request',
             'headless_mode': False,
-            'font_size': 13
+            'font_size': 16
         }
     
     def save_settings(self):
@@ -108,7 +108,7 @@ class Settings:
 
     def get_font_size(self) -> int:
         """Get configured UI font size."""
-        return self.settings.get('font_size', 13)
+        return self.settings.get('font_size', 16)
     
     def update_settings(self, student_id: Optional[str] = None, 
                        password: Optional[str] = None,

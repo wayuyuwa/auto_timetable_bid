@@ -7,7 +7,6 @@ import sys
 import threading
 import time
 
-# Must be imported before PyQt5 to avoid conflicts
 from ..scrapers.playwright_scraper import PlaywrightScraper
 from ..scrapers.request_scraper import RequestScraper
 
@@ -15,27 +14,14 @@ from PyQt5 import uic
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QApplication,
-    QComboBox,
-    QFormLayout,
-    QGroupBox,
-    QHeaderView,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
+    QApplication, QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 from ..utils.config import BASE_DIR, WINDOW_POSITION, WINDOW_SIZE, WINDOW_TITLE
 from ..utils.logger import setup_crash_logging, setup_logger
 from ..utils.settings import Settings
-from .course_manager import CourseManager
+from .course_manager import CourseManagerWidget
 from .styles import apply_stylesheet
 
 logger = setup_logger(__name__)
@@ -166,7 +152,6 @@ class ScraperThread(QThread):
             except Exception as error:
                 logger.error(f"Error during cancellation: {error}")
 
-
 class MainWindow(QMainWindow):
     """Main window for the UTAR Course Registration Scraper."""
 
@@ -190,10 +175,10 @@ class MainWindow(QMainWindow):
         self._setup_logging()
         self._load_settings()
         self._load_courses()
+        self._save_settings()
 
     def _setup_ui(self):
         """Load Qt Designer UI and wire signals."""
-
         ui_path = os.path.join(os.path.dirname(__file__), "main_window.ui")
         uic.loadUi(ui_path, self)
 
@@ -204,27 +189,19 @@ class MainWindow(QMainWindow):
         self.headless_checkbox = self.check_headless
         self.execute_button = self.btn_start
         self.stop_button = self.btn_stop
-        self.courses_table: QTableWidget = self.courses_table
-        self.manage_courses_btn = self.btn_manage_courses
         self.font_size_spin = self.spin_font_size
-
-        self._configure_courses_table()
+        
+        # Inject the integrated Course Manager widget
+        self.course_manager = CourseManagerWidget(self)
+        self.page_courses.layout().addWidget(self.course_manager)
+        self.course_manager.course_updated.connect(self._on_courses_updated)
 
         self._setup_navigation()
         self._setup_dynamic_controls()
         self._setup_connections()
 
-    def _configure_courses_table(self):
-        """Configure the courses table widget in the main UI."""
-
-        self.courses_table.setColumnCount(2)
-        self.courses_table.setHorizontalHeaderLabels(["Course Code", "Course Name"])
-        self.courses_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.courses_table.verticalHeader().setVisible(False)
-
     def _setup_navigation(self):
         """Wire sidebar navigation to stacked pages."""
-
         self.btn_login.clicked.connect(lambda: self.stackedWidget.setCurrentWidget(self.page_login))
         self.btn_courses.clicked.connect(lambda: self.stackedWidget.setCurrentWidget(self.page_courses))
         self.btn_config.clicked.connect(lambda: self.stackedWidget.setCurrentWidget(self.page_config))
@@ -234,8 +211,6 @@ class MainWindow(QMainWindow):
 
     def _setup_dynamic_controls(self):
         """Add runtime controls needed by existing logic but not present in UI file."""
-
-        # Max retries selector for Request mode.
         form_extra = self.findChild(QFormLayout, "formLayout_extra")
         self.retry_label = QLabel("Max Retries")
         self.retry_combo = QComboBox()
@@ -243,7 +218,6 @@ class MainWindow(QMainWindow):
         self.retry_combo.setCurrentText("999")
         form_extra.addRow(self.retry_label, self.retry_combo)
 
-        # Results panel shared across pages.
         results_group = QGroupBox("Results")
         results_layout = QVBoxLayout(results_group)
         self.results_display = QTextEdit()
@@ -258,7 +232,6 @@ class MainWindow(QMainWindow):
         main_layout = self.findChild(QVBoxLayout, "verticalLayout_mainArea")
         main_layout.insertWidget(main_layout.count() - 1, results_group)
 
-        # Make password input save-friendly and add visibility toggle button.
         self.pw_input.setEchoMode(QLineEdit.Password)
         self.show_pw_button = QPushButton("Show")
         self.show_pw_button.setCheckable(True)
@@ -276,8 +249,6 @@ class MainWindow(QMainWindow):
         login_form.setWidget(1, QFormLayout.FieldRole, pw_container)
 
     def _setup_connections(self):
-        """Connect events to handlers."""
-
         self.execute_button.clicked.connect(self._execute_scraping)
         self.stop_button.clicked.connect(self._stop_scraping)
         self.stop_button.setEnabled(False)
@@ -286,16 +257,12 @@ class MainWindow(QMainWindow):
         self.pw_input.editingFinished.connect(self._save_settings)
         self.headless_checkbox.stateChanged.connect(self._on_headless_changed)
         self.retry_combo.currentTextChanged.connect(self._on_retry_changed)
-        self.manage_courses_btn.clicked.connect(self._open_course_manager)
         self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
 
         self.radio_bs4.toggled.connect(self._on_engine_selection_changed)
         self.radio_playwright.toggled.connect(self._on_engine_selection_changed)
-        self.radio_selenium.toggled.connect(self._on_engine_selection_changed)
 
     def _setup_logging(self):
-        """Set up logging to GUI."""
-
         self.gui_handler = GUILogHandler(self.results_display)
         self.gui_handler.setLevel(logging.INFO)
         logging.getLogger().addHandler(self.gui_handler)
@@ -306,29 +273,21 @@ class MainWindow(QMainWindow):
         self.show_pw_button.setText("Hide" if checked else "Show")
 
     def _get_selected_method(self) -> str:
-        if self.radio_bs4.isChecked():
-            return "Request"
-        if self.radio_playwright.isChecked() or self.radio_selenium.isChecked():
-            return "Playwright"
+        if self.radio_bs4.isChecked(): return "Request"
+        if self.radio_playwright.isChecked(): return "Playwright"
         return "Request"
 
     def _set_method_controls(self, method: str):
-        if method == "Playwright":
-            self.radio_playwright.setChecked(True)
-        else:
-            self.radio_bs4.setChecked(True)
+        if method == "Playwright": self.radio_playwright.setChecked(True)
+        else: self.radio_bs4.setChecked(True)
 
     def _load_settings(self):
-        """Load saved settings."""
-
         self.id_input.setText(self.settings.get_student_id())
         self.pw_input.setText(self.settings.get_password())
 
         method = self.settings.get_method()
-        if method == "BeautifulSoup":
-            method = "Request"
-        elif method == "Selenium":
-            method = "Playwright"
+        if method == "BeautifulSoup": method = "Request"
+        else: method = "Playwright"
 
         self._set_method_controls(method)
         self.headless_checkbox.setChecked(self.settings.get_headless_mode())
@@ -338,8 +297,6 @@ class MainWindow(QMainWindow):
         self._on_method_changed(method)
 
     def _save_settings(self):
-        """Save current settings."""
-
         self.settings.update_settings(
             student_id=self.id_input.text(),
             password=self.pw_input.text(),
@@ -360,15 +317,12 @@ class MainWindow(QMainWindow):
         self._on_method_changed(self._get_selected_method())
 
     def _on_method_changed(self, method: str):
-        """Handle method selection change."""
-
         is_playwright = method == "Playwright"
         self.headless_checkbox.setVisible(is_playwright)
         self.label_timeout.setVisible(is_playwright)
         self.timeout.setVisible(is_playwright)
         self.retry_label.setVisible(not is_playwright)
         self.retry_combo.setVisible(not is_playwright)
-
         self._save_settings()
         logger.info(f"Scraping method changed to: {method}")
 
@@ -381,8 +335,6 @@ class MainWindow(QMainWindow):
         logger.info(f"Max retries changed to: {value}")
 
     def _execute_scraping(self):
-        """Execute the selected scraping method."""
-
         method = self._get_selected_method()
         student_id = self.id_input.text().strip()
         password = self.pw_input.text().strip()
@@ -394,14 +346,13 @@ class MainWindow(QMainWindow):
             return
 
         if not self.courses:
-            QMessageBox.warning(self, "Warning", "Please add courses in the Course Manager first")
+            QMessageBox.warning(self, "Warning", "Please add courses first")
             self.btn_courses.setChecked(True)
             self.stackedWidget.setCurrentWidget(self.page_courses)
             return
 
         self.execute_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-
         logger.info(f"Starting {method} scraping with {len(self.courses)} courses...")
 
         scraper = self.playwright_scraper if method == "Playwright" else self.request_scraper
@@ -416,18 +367,13 @@ class MainWindow(QMainWindow):
         self.scraper_thread.start()
 
     def _stop_scraping(self):
-        """Stop the current scraping operation."""
-
         if self.scraper_thread and self.scraper_thread.isRunning():
             logger.info("Stopping scraping operation...")
             self.scraper_thread.stop()
-
         self.execute_button.setEnabled(True)
         self.stop_button.setEnabled(False)
 
     def _on_scraping_finished(self, success: bool, message: str):
-        """Handle scraping completion."""
-
         self.results_display.setText(message)
         self.execute_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -442,88 +388,51 @@ class MainWindow(QMainWindow):
             logger.info("Scraping completed successfully")
 
     def _on_progress(self, message: str):
-        """Handle progress updates."""
-
         self.results_display.append(message)
         logger.info(message)
 
-    def _open_course_manager(self):
-        """Open the course manager dialog."""
-
-        logger.info("Opening course manager...")
-        dialog = CourseManager(self)
-        dialog.course_updated.connect(self._on_courses_updated)
-        dialog.exec_()
-
     def _on_courses_updated(self, courses):
         self.courses = courses
-        self._populate_courses_table()
         logger.info(f"Courses updated: {len(courses)} courses loaded")
 
-    def _populate_courses_table(self):
-        """Render course data in the main courses table."""
-
-        self.courses_table.setRowCount(0)
-        for course in self.courses:
-            row_position = self.courses_table.rowCount()
-            self.courses_table.insertRow(row_position)
-            self.courses_table.setItem(row_position, 0, QTableWidgetItem(course.code))
-            self.courses_table.setItem(row_position, 1, QTableWidgetItem(course.name))
-
     def _load_courses(self):
-        """Load courses from storage through the course manager."""
-
         try:
-            course_manager = CourseManager(self)
-            self.courses = course_manager.get_courses()
-            self._populate_courses_table()
+            self.courses = self.course_manager.get_courses()
             logger.info(f"Loaded {len(self.courses)} courses on startup")
         except Exception as error:
             logger.error(f"Failed to load courses on startup: {error}")
             self.courses = []
 
     def set_timetable_file(self, file_path):
-        """Set the timetable file path."""
-
         if file_path and os.path.exists(file_path):
             try:
                 if file_path.lower().endswith(".json"):
                     with open(file_path, "r", encoding="utf-8") as file:
                         data = json.load(file)
                         from ..utils.timetable_reader import Course
-
                         courses = [Course(**course) for course in data]
                 else:
                     from ..utils.timetable_reader import TimetableReader
-
                     courses = TimetableReader.read_timetable(file_path)
 
                 if courses:
-                    course_manager = CourseManager(self)
-                    course_manager.set_courses(courses)
+                    self.course_manager.set_courses(courses)
                     self.courses = courses
-                    self._populate_courses_table()
                     logger.info(f"Loaded {len(courses)} courses from file: {file_path}")
                     return True
-
                 logger.warning(f"No courses found in file: {file_path}")
             except Exception as error:
                 logger.error(f"Failed to load courses from file: {error}")
         else:
             logger.error(f"File not found or invalid path: {file_path}")
-
         return False
 
     def set_method(self, method):
-        """Set the scraping method."""
-
-        if method and method.lower() in ["request", "playwright", "beautifulsoup", "selenium"]:
-            method_map = {
-                "request": "Request",
-                "playwright": "Playwright",
-                "beautifulsoup": "Request",
-                "selenium": "Playwright",
-            }
+        method_map = {
+            "request": "Request", "playwright": "Playwright",
+            "beautifulsoup": "Request",
+        }
+        if method and method.lower() in method_map.keys():
             formatted_method = method_map.get(method.lower())
             if formatted_method:
                 self._set_method_controls(formatted_method)
@@ -534,21 +443,15 @@ class MainWindow(QMainWindow):
         return False
 
     def closeEvent(self, event):
-        """Handle close event and cleanup."""
-
         if self.scraper_thread and self.scraper_thread.isRunning():
             logger.info("Application closing: Stopping scraper thread...")
             try:
                 self.scraper_thread.stop()
                 self.scraper_thread.wait(1000)
-                if self.scraper_thread.isRunning():
-                    logger.warning("Thread still running during application shutdown")
             except Exception as error:
                 logger.error(f"Error during shutdown cleanup: {error}")
-
         self._save_settings()
         event.accept()
-
 
 def main(args=None):
     """Main entry point for the application."""

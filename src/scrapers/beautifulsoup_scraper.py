@@ -12,7 +12,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from ..utils.config import (
     BASE_URL, LOGIN_URL, LOGIN_PROCESS_URL, REGISTRATION_URL,
-    HOME_URL, COURSE_REGISTRATION_URL, DEFAULT_HEADERS
+    COURSE_REGISTRATION_URL, DEFAULT_HEADERS
 )
 from ..utils.captcha_solver import CaptchaSolver
 from ..utils.logger import setup_logger
