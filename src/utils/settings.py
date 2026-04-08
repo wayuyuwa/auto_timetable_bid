@@ -44,7 +44,8 @@ class Settings:
             'student_id': '',
             'password': '',
             'method': 'Request',
-            'headless_mode': False
+            'headless_mode': False,
+            'font_size': 13
         }
     
     def save_settings(self):
@@ -104,12 +105,17 @@ class Settings:
             int: Maximum number of retries
         """
         return self.settings.get('max_retries', 3)
+
+    def get_font_size(self) -> int:
+        """Get configured UI font size."""
+        return self.settings.get('font_size', 13)
     
     def update_settings(self, student_id: Optional[str] = None, 
                        password: Optional[str] = None,
                        method: Optional[str] = None,
                        headless_mode: Optional[bool] = None,
-                       max_retries: Optional[int] = None,):
+                       max_retries: Optional[int] = None,
+                       font_size: Optional[int] = None,):
         """
         Update settings.
         
@@ -120,6 +126,7 @@ class Settings:
             method (Optional[str]): Last used method to save
             headless_mode (Optional[bool]): Whether to enable headless mode
             max_retries (Optional[int]): Maximum number of retries for scraping
+            font_size (Optional[int]): UI font size in pixels
         """
         if student_id is not None:
             self.settings['student_id'] = student_id
@@ -131,4 +138,6 @@ class Settings:
             self.settings['headless_mode'] = headless_mode
         if max_retries is not None:
             self.settings['max_retries'] = max_retries
+        if font_size is not None:
+            self.settings['font_size'] = font_size
         self.save_settings() 
