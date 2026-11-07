@@ -45,7 +45,9 @@ def build_executable():
     
     # Define PyInstaller command
     cmd = [
-        "pyinstaller",
+        sys.executable,
+        "-m",
+        "PyInstaller",
         "--name=UnitRegTimetable",
         "--onefile",  # Create a single executable
         "--windowed",  # Don't show console window for GUI app
