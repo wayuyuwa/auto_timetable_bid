@@ -2,25 +2,17 @@
 CAPTCHA solving utility using ddddocr.
 """
 
-import ddddocr
-from PIL import Image
 import logging
-import time
-import requests.exceptions
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-# Fix for newer PIL versions
-if not hasattr(Image, 'ANTIALIAS'):
-    setattr(Image, 'ANTIALIAS', Image.LANCZOS)
 
 class CaptchaSolver:
     """CAPTCHA solver using ddddocr."""
     
     def __init__(self):
-        """Initialize the OCR engine."""
-        self.ocr = ddddocr.DdddOcr()
+        """Create a solver without loading the optional ONNX runtime yet."""
+        self.ocr = None
     
     def solve(self, image: bytes) -> str:
         """
@@ -34,7 +26,12 @@ class CaptchaSolver:
         """
         
         try:
-            return self.ocr.classification(image)
+            if self.ocr is None:
+                from .ocr.OCR import OCR
+
+                self.ocr = OCR()
+                self.ocr.init()
+            return self.ocr.recognize(image)
         except Exception as e:
             logger.error(f"Unexpected error during CAPTCHA solving: {str(e)}")
             raise

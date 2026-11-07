@@ -16,7 +16,8 @@ from ..utils.config import (
 )
 from ..utils.captcha_solver import CaptchaSolver
 from ..utils.logger import setup_logger
-from ..utils.timetable_reader import Course
+from ..models.course import Course
+from .html_parser import find_course_value, parse_home_page
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -62,6 +63,7 @@ class BeautifulSoupScraper:
         self.session.mount("https://", adapter)
         
         self.headers = DEFAULT_HEADERS
+        self.connection_timeout = connection_timeout
         self.captcha_solver = CaptchaSolver()
         self.max_retries = 2
         
@@ -185,7 +187,8 @@ class BeautifulSoupScraper:
                 REGISTRATION_URL,
                 headers=self.headers,
                 data=data,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -256,7 +259,8 @@ class BeautifulSoupScraper:
                 REGISTRATION_URL,
                 headers=self.headers,
                 data=data,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -327,7 +331,12 @@ class BeautifulSoupScraper:
                 
                 # Get login page
                 logger.info(f"Attempting to get login page (attempt {retry_count+1}/{max_retries})")
-                response = self.session.get(LOGIN_URL, headers=self.headers, verify=False)
+                response = self.session.get(
+                    LOGIN_URL,
+                    headers=self.headers,
+                    verify=False,
+                    timeout=self.connection_timeout,
+                )
                 
                 self._check_cancellation()
                 
@@ -355,7 +364,12 @@ class BeautifulSoupScraper:
                 
                 try:
                     logger.info(f"Attempting to retrieve CAPTCHA image")
-                    captcha_response = self.session.get(captcha_url, headers=self.headers, verify=False)
+                    captcha_response = self.session.get(
+                        captcha_url,
+                        headers=self.headers,
+                        verify=False,
+                        timeout=self.connection_timeout,
+                    )
                     
                     self._check_cancellation()
                     
@@ -409,7 +423,8 @@ class BeautifulSoupScraper:
                     LOGIN_PROCESS_URL,
                     headers=self.headers,
                     data=payload,
-                    verify=False
+                    verify=False,
+                    timeout=self.connection_timeout
                 )
 
                 try:
@@ -488,7 +503,12 @@ class BeautifulSoupScraper:
         try:
             self._check_cancellation()
             
-            response = self.session.get(COURSE_REGISTRATION_URL, headers=self.headers, verify=False)
+            response = self.session.get(
+                COURSE_REGISTRATION_URL,
+                headers=self.headers,
+                verify=False,
+                timeout=self.connection_timeout,
+            )
             
             self._check_session_expired(response)
             
@@ -496,26 +516,10 @@ class BeautifulSoupScraper:
                 logger.info(f'Failed to retrieve home page. Status code: {response.status_code}')
                 return None, self.session.cookies.get_dict()
             
-            soup = BeautifulSoup(response.content, 'html.parser')
-            table = soup.find('table', {'id': 'tblGrid'})
-            
-            if not table:
+            data = parse_home_page(response.content.decode('utf-8', errors='ignore'))
+            if not data:
                 logger.info('Table not found.')
                 return None, self.session.cookies.get_dict()
-            
-            data = {}
-            rows = table.find_all('tr', align='left')
-            
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) >= 2:
-                    key = cols[0].get_text(strip=True)
-                    if len(cols) == 4:
-                        data[key] = cols[1].get_text(strip=True)
-                        second_key = cols[2].get_text(strip=True)
-                        data[second_key] = cols[3].get_text(strip=True)
-                    else:
-                        data[key] = cols[1].get_text(strip=True)
             
             logger.info('Extracted Data:')
             for key, value in data.items():
@@ -687,7 +691,8 @@ class BeautifulSoupScraper:
                 REGISTRATION_URL,
                 headers=self.headers,
                 data=data,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -759,7 +764,8 @@ class BeautifulSoupScraper:
                 REGISTRATION_URL,
                 headers=self.headers,
                 data=data,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -844,7 +850,8 @@ class BeautifulSoupScraper:
                 'https://unitreg.utar.edu.my/portal/courseRegStu/registration/registerUnitProSurvey.jsp',
                 headers=headers,
                 data=data_bundle,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -894,8 +901,8 @@ class BeautifulSoupScraper:
         Cancel the current session.
         """
         try:
-            self.session.close()
             self._cancellation_token.set()
+            self.session.close()
             self._is_logged_in = False
             logger.info("Session cancelled successfully.")
         except Exception as e:

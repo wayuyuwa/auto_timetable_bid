@@ -74,7 +74,7 @@ def build_executable():
         "--hidden-import=PyQt5.QtWidgets",
         "--hidden-import=requests",
         "--hidden-import=bs4",
-        "--hidden-import=selenium",
+        "--hidden-import=playwright",
         "--hidden-import=ddddocr",
     ])
     
@@ -92,8 +92,8 @@ def build_executable():
         print("\nUsage examples:")
         print("  UnitRegTimetable.exe")
         print("  UnitRegTimetable.exe --timetable-file MyTimetable.txt")
-        print("  UnitRegTimetable.exe --method selenium")
-        print("  UnitRegTimetable.exe --timetable-file MyTimetable.txt --method selenium")
+        print("  UnitRegTimetable.exe --method playwright")
+        print("  UnitRegTimetable.exe --timetable-file MyTimetable.txt --method playwright")
     except subprocess.CalledProcessError as e:
         print(f"Build failed with error: {e}")
         return False

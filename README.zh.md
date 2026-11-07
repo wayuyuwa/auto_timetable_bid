@@ -5,7 +5,7 @@
 > **免责声明**：本项目**仅供教育目的**使用。它展示了网页爬虫、自动化和GUI开发的概念。用户需确保使用本工具时遵守UTAR的服务条款和政策。开发者不对任何滥用或使用本工具产生的后果负责。
 
 一个使用Python展示网页爬虫和自动化技术的教育项目。本项目展示了：
-- 使用BeautifulSoup和Selenium进行网页爬虫
+- 使用BeautifulSoup和Playwright进行网页爬虫
 - 使用PyQt5开发GUI界面
 - CAPTCHA验证码破解
 - 浏览器自动化交互
@@ -17,7 +17,7 @@
 
 - **双重爬虫方法**：
   - BeautifulSoup用于轻量级爬虫
-  - Selenium用于完整的浏览器自动化，包括CAPTCHA处理
+  - Playwright用于完整的浏览器自动化，包括CAPTCHA处理
 - **自动化课程注册**：
   - 支持基于时间表的课程注册
   - 基于偏好的自动时段选择
@@ -26,7 +26,7 @@
   - 基于PyQt5的现代界面
   - 设置持久化
   - 进度反馈
-  - 可折叠的Selenium选项
+  - 可折叠的Playwright选项
 - **附加功能**：
   - 安全的凭证存储
   - 使用ddddocr进行CAPTCHA验证码破解
@@ -36,10 +36,10 @@
 
 - Python 3.8+
 - PyQt5
-- Selenium
+- Playwright
 - BeautifulSoup4
 - ddddocr
-- Firefox WebDriver（用于Selenium）
+- Chromium（由Playwright安装）
 
 ## 安装步骤
 
@@ -60,10 +60,10 @@ source venv/bin/activate  # Windows系统: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. 下载Firefox WebDriver：
-   - 访问 [Mozilla GeckoDriver 发布页面](https://github.com/mozilla/geckodriver/releases)
-   - 下载适合您系统的版本
-   - 将驱动程序添加到系统PATH中
+4. 安装Playwright浏览器：
+```bash
+python -m playwright install chromium
+```
 
 ## 使用方法
 
@@ -73,10 +73,10 @@ python src/main.py
 ```
 
 2. 配置设置：
-   - 选择爬虫方法（BeautifulSoup或Selenium）
+  - 选择爬虫方法（BeautifulSoup或Playwright）
    - 输入UTAR账号凭证
    - （可选）选择时间表文件
-   - （可选）配置Selenium选项（无头模式）
+  - （可选）配置Playwright选项（无头模式）
 
 3. 开始爬取：
    - 点击"执行爬取"开始
@@ -100,7 +100,7 @@ src/
 │   └── __init__.py
 ├── scrapers/
 │   ├── beautifulsoup_scraper.py
-│   ├── selenium_scraper.py
+│   ├── playwright_scraper.py
 │   └── __init__.py
 ├── utils/
 │   ├── captcha_solver.py   # CAPTCHA破解工具

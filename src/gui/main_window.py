@@ -3,24 +3,21 @@ Main window implementation for the UTAR Course Registration Scraper GUI.
 """
 
 import sys
-import socket
-import requests
-import time
-import threading
+import os
+import logging
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QPushButton, QLabel, QComboBox, 
                            QLineEdit, QTextEdit, QMessageBox, QFileDialog,
                            QCheckBox, QGroupBox, QTabWidget, QToolButton, QStyle)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QIcon, QFont
-import logging
-import os
-from ..scrapers.beautifulsoup_scraper import BeautifulSoupScraper
-from ..scrapers.selenium_scraper import SeleniumScraper
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
+from ..services.bidding_service import BiddingService
+from ..services.worker_thread import WorkerThreadManager
+from ..models.course import Course
+from ..models.bid_result import BidResult, BidStatus
 from ..utils.config import (
     WINDOW_TITLE, WINDOW_SIZE, WINDOW_POSITION,
-    BASE_DIR,
-    LOGIN_URL
+    BASE_DIR
 )
 from ..utils.settings import Settings
 from ..utils.logger import setup_logger, setup_crash_logging
@@ -44,122 +41,6 @@ class GUILogHandler(logging.Handler):
         msg = self.format(record)
         self.text_widget.append(msg)
 
-class ScraperThread(QThread):
-    """Thread for running scraper operations."""
-    finished = pyqtSignal(bool, str)
-    progress = pyqtSignal(str)
-    
-    def __init__(self, scraper, method, student_id, password, courses=None):
-        super().__init__()
-        self.scraper = scraper
-        self.method = method
-        self.student_id = student_id
-        self.password = password
-        self.courses = courses or []
-        self.is_running = True
-        
-    def run(self):
-        """Run the scraper operation."""
-        try:
-            if not self.is_running:
-                self.finished.emit(True, "Operation cancelled by user")
-                return
-
-            self.scraper.reset_cancellation()
-            if self.method == "BeautifulSoup":
-                try:
-                    # Emit progress update for login attempt
-                    self.progress.emit("Attempting to log in to UTAR course registration system...")
-                    
-                    if self.scraper.login(self.student_id, self.password):
-                        if self.courses:
-                            try:
-                                self.progress.emit(f"Login successful. Attempting to register {len(self.courses)} courses...")
-                                result_text, success = self.scraper.register_courses(self.courses)
-                                self.finished.emit(success, result_text)
-                            except Exception as e:
-                                # Critical error that couldn't be handled in register_courses
-                                logger.error(f"Critical error in course registration: {str(e)}")
-                                self.finished.emit(False, f"Critical error in BeautifulSoup course registration: {str(e)}")
-                        else:
-                            home_data = self.scraper.get_home_page_data()
-                            result_text = "BeautifulSoup Scraping Results:\n\n"
-                            if home_data:
-                                result_text += "Home Page Data:\n"
-                                for key, value in home_data.items():
-                                    result_text += f"{key}: {value}\n"
-                            else:
-                                result_text += "No data found on home page.\n"
-                            self.finished.emit(True, result_text)
-                except Exception as e:
-                    # Unexpected error
-                    logger.error(f"Unexpected error: {str(e)}")
-                    self.finished.emit(False, f"An unexpected error occurred: {str(e)}")
-            else:  # Selenium
-                if not self.is_running:
-                    self.finished.emit(True, "Operation cancelled by user")
-                    return
-
-                try:
-                    if self.scraper.login(self.student_id, self.password):
-                        if not self.is_running:
-                            self.finished.emit(True, "Operation cancelled by user")
-                            return
-
-                        if self.courses:
-                            if self.scraper.register_courses(self.courses):
-                                self.finished.emit(True, "Course registration completed successfully!")
-                            else:
-                                self.finished.emit(False, "Course registration failed. Check the logs for details.")
-                        else:
-                            # TODO: Implement basic scraping for Selenium
-                            self.finished.emit(True, "Selenium basic scraping not implemented yet")
-                except Exception as e:
-                    self.finished.emit(False, str(e))
-        except Exception as e:
-            error_msg = str(e)
-            if "Operation cancelled by user" in error_msg or "WebDriver is being cleaned up" in error_msg:
-                self.finished.emit(True, "Operation cancelled by user")
-            else:
-                self.finished.emit(False, f"Scraping failed: {error_msg}")
-        finally:
-            # Always clean up resources in the finally block
-            if self.method == "Selenium" and self.scraper:
-                try:
-                    self.scraper.cleanup()
-                except Exception as e:
-                    logger.error(f"Error during cleanup: {str(e)}")
-    
-    def stop(self):
-        """Stop the scraper operation."""
-        self.is_running = False
-        # First set the cancellation flag and then separately handle cleanup based on scraper type
-        if self.scraper:
-            try:
-                # Always cancel first
-                self.scraper.cancel()
-                
-                # For selenium, we need to start a watcher thread to ensure the driver gets shut down
-                if self.method == "Selenium":
-                    def force_quit_after_timeout():
-                        """Force quit the driver if cleanup takes too long"""
-                        # Wait up to 5 seconds for normal cleanup
-                        time.sleep(5)
-                        if hasattr(self.scraper, "driver") and self.scraper.driver:
-                            logger.warning("Forcing driver quit after timeout")
-                            try:
-                                driver_ref = self.scraper.driver
-                                if driver_ref:
-                                    driver_ref.quit()
-                                self.scraper.driver = None
-                            except Exception as e:
-                                logger.error(f"Error during forced driver quit: {str(e)}")
-                    
-                    # Start watchdog thread
-                    threading.Thread(target=force_quit_after_timeout, daemon=True).start()
-            except Exception as e:
-                logger.error(f"Error during cancellation: {str(e)}")
-
 class MainWindow(QMainWindow):
     """Main window for the UTAR Course Registration Scraper."""
     
@@ -181,18 +62,16 @@ class MainWindow(QMainWindow):
         # Initialize settings
         self.settings = Settings()
         
-        # Initialize scrapers
-        self.beautifulsoup_scraper = BeautifulSoupScraper()
-        self.selenium_scraper = SeleniumScraper()
-        
-        # Initialize scraper thread
-        self.scraper_thread = None
+        # Initialize service layer
+        self.bidding_service = BiddingService()
+        self.thread_manager = WorkerThreadManager()
         
         # Initialize course list
         self.courses = []
         
         self._setup_ui()
         self._setup_logging()
+        self._connect_service_signals()
         self._load_settings()
         self._load_courses()
     
@@ -208,6 +87,23 @@ class MainWindow(QMainWindow):
         
         # Log initial message
         logger.info("Application started")
+    
+    def _connect_service_signals(self):
+        """Connect bidding service signals to GUI update methods."""
+        # Login signals
+        self.bidding_service.login_progress.connect(self._on_login_progress)
+        self.bidding_service.login_completed.connect(self._on_login_completed)
+        
+        # Bidding signals
+        self.bidding_service.bid_started.connect(self._on_bidding_started)
+        self.bidding_service.bid_progress.connect(self._on_bid_progress)
+        self.bidding_service.bid_course_completed.connect(self._on_course_completed)
+        self.bidding_service.bid_all_completed.connect(self._on_bidding_completed)
+        
+        # Error signals
+        self.bidding_service.session_expired.connect(self._on_session_expired)
+        self.bidding_service.network_error.connect(self._on_network_error)
+        self.bidding_service.operation_cancelled.connect(self._on_operation_cancelled)
     
     def _setup_ui(self):
         """Set up the user interface."""
@@ -229,7 +125,7 @@ class MainWindow(QMainWindow):
         method_layout = QHBoxLayout()
         method_label = QLabel("Select Method:")
         self.method_combo = QComboBox()
-        self.method_combo.addItems(["BeautifulSoup", "Selenium"])
+        self.method_combo.addItems(["BeautifulSoup", "Playwright"])
         self.method_combo.currentTextChanged.connect(self._on_method_changed)
         method_layout.addWidget(method_label)
         method_layout.addWidget(self.method_combo)
@@ -246,15 +142,15 @@ class MainWindow(QMainWindow):
         method_group.setLayout(method_layout)
         scraping_layout.addWidget(method_group)
         
-        # Selenium options group
-        self.selenium_group = QGroupBox("Selenium Options")
-        selenium_layout = QVBoxLayout()
+        # Playwright options group
+        self.playwright_group = QGroupBox("Playwright Options")
+        playwright_layout = QVBoxLayout()
         self.headless_checkbox = QCheckBox("Run in headless mode")
-        self.headless_checkbox.setToolTip("Run Selenium in headless mode (no GUI)")
+        self.headless_checkbox.setToolTip("Run Playwright in headless mode (no GUI)")
         self.headless_checkbox.stateChanged.connect(self._on_headless_changed)
-        selenium_layout.addWidget(self.headless_checkbox)
-        self.selenium_group.setLayout(selenium_layout)
-        scraping_layout.addWidget(self.selenium_group)
+        playwright_layout.addWidget(self.headless_checkbox)
+        self.playwright_group.setLayout(playwright_layout)
+        scraping_layout.addWidget(self.playwright_group)
 
         # Registration options group
         registration_group = QGroupBox("Registration Options")
@@ -481,13 +377,15 @@ class MainWindow(QMainWindow):
     
     def _on_method_changed(self, method: str):
         """Handle method selection change."""
-        self.selenium_group.setVisible(method == "Selenium")
+        self.playwright_group.setVisible(method == "Playwright")
         self.retry_combo.setVisible(method == "BeautifulSoup")
+        self.bidding_service.set_scraper_type(method)
         self._save_settings()
         logger.info(f"Scraping method changed to: {method}")
     
     def _on_headless_changed(self, state: int):
         """Handle headless mode checkbox state change."""
+        self.bidding_service.set_headless_mode(bool(state))
         self._save_settings()
         logger.info(f"Headless mode {'enabled' if state else 'disabled'}")
 
@@ -497,8 +395,7 @@ class MainWindow(QMainWindow):
         logger.info(f"Max retries changed to: {value}")
     
     def _execute_scraping(self):
-        """Execute the selected scraping method."""
-        method = self.method_combo.currentText()
+        """Execute the bidding operation using the service layer."""
         student_id = self.id_input.text()
         password = self.pw_input.text()
         
@@ -513,54 +410,97 @@ class MainWindow(QMainWindow):
         # Disable execute button and enable stop button
         self.execute_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.results_display.clear()
         
-        logger.info(f"Starting {method} scraping with {len(self.courses)} courses...")
+        logger.info(f"Starting bidding with {len(self.courses)} courses...")
         
-        # Create and start scraper thread
-        scraper = self.selenium_scraper if method == "Selenium" else self.beautifulsoup_scraper
-        if method == "Selenium":
-            scraper.set_headless_mode(self.headless_checkbox.isChecked())
-        elif method == "BeautifulSoup":
-            scraper.set_max_retries(int(self.retry_combo.currentText()))
-
-        self.scraper_thread = ScraperThread(
-            scraper, method, student_id, password, self.courses
+        # Start login in worker thread
+        self.thread_manager.start_worker(
+            self.bidding_service.login,
+            student_id,
+            password
         )
-        self.scraper_thread.finished.connect(self._on_scraping_finished)
-        self.scraper_thread.progress.connect(self._on_progress)
-        self.scraper_thread.start()
     
     def _stop_scraping(self):
-        """Stop the current scraping operation."""
-        if self.scraper_thread and self.scraper_thread.isRunning():
-            logger.info("Stopping scraping operation...")
-            self.scraper_thread.stop()
+        """Stop the current bidding operation."""
+        logger.info("Stopping bidding operation...")
+        self.bidding_service.cancel()
+        self.thread_manager.stop_all()
         
         # Reset button states
         self.execute_button.setEnabled(True)
         self.stop_button.setEnabled(False)
     
-    def _on_scraping_finished(self, success: bool, message: str):
-        """Handle scraping completion."""
-        self.results_display.setText(message)
-        
-        # Reset button states
-        self.execute_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        
-        if "WebDriver stopped successfully" in message:
-            logger.info("WebDriver stopped successfully")
-            QMessageBox.information(self, "Success", "WebDriver stopped successfully")
-        elif not success:
-            logger.error(f"Scraping failed: {message}")
-            QMessageBox.warning(self, "Warning", message)
+    def _on_login_progress(self, message: str):
+        """Handle login progress updates."""
+        self.results_display.append(f"[LOGIN] {message}")
+    
+    def _on_login_completed(self, success: bool, message: str):
+        """Handle login completion."""
+        if success:
+            self.results_display.append(f"[LOGIN] ✓ {message}")
+            # Start bidding after successful login
+            self.thread_manager.start_worker(
+                self.bidding_service.bid_courses,
+                self.courses
+            )
         else:
-            logger.info("Scraping completed successfully")
+            self.results_display.append(f"[LOGIN] ✗ {message}")
+            QMessageBox.warning(self, "Login Failed", message)
+            self.execute_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
     
-    def _on_progress(self, message: str):
-        """Handle progress updates."""
-        self.results_display.append(message)
-        logger.info(message)
+    def _on_bidding_started(self, total: int):
+        """Handle bidding start."""
+        self.results_display.append(f"\n[BIDDING] Starting to bid {total} courses...\n")
+    
+    def _on_bid_progress(self, message: str, current: int, total: int):
+        """Handle bidding progress updates."""
+        self.results_display.append(f"[{current}/{total}] {message}")
+    
+    def _on_course_completed(self, result: BidResult):
+        """Handle individual course bidding completion."""
+        status_symbol = "✓" if result.is_successful() else "✗"
+        self.results_display.append(f"  {status_symbol} {result.course_code}: {result.message}")
+    
+    def _on_bidding_completed(self, success: bool, results: list):
+        """Handle overall bidding completion."""
+        self.results_display.append(f"\n[RESULT] Bidding completed.")
+        
+        # Count successes
+        successful = sum(1 for r in results if r.is_successful())
+        total = len(results)
+        self.results_display.append(f"Successfully registered: {successful}/{total}")
+        
+        # Reset button states
+        self.execute_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        
+        if success:
+            QMessageBox.information(self, "Success", f"All courses registered successfully!")
+        else:
+            QMessageBox.warning(self, "Completed with Errors", 
+                              f"Registered {successful} out of {total} courses.")
+    
+    def _on_session_expired(self):
+        """Handle session expiration."""
+        self.results_display.append("\n[ERROR] Session expired. Please login again.")
+        QMessageBox.warning(self, "Session Expired", "Your session has expired. Please try again.")
+        self.execute_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+    
+    def _on_network_error(self, error_msg: str):
+        """Handle network errors."""
+        self.results_display.append(f"\n[ERROR] Network error: {error_msg}")
+        QMessageBox.critical(self, "Network Error", f"A network error occurred: {error_msg}")
+        self.execute_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+    
+    def _on_operation_cancelled(self):
+        """Handle operation cancellation."""
+        self.results_display.append("\n[CANCELLED] Operation cancelled by user.")
+        self.execute_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
     
     def _open_course_manager(self):
         """Open the course manager dialog."""
@@ -578,8 +518,8 @@ class MainWindow(QMainWindow):
         info_text = """
         <h3>Scraping Methods</h3>
         <p><b>BeautifulSoup:</b> Faster execution, lower resource usage, no browser required.</p>
-        <p><b>Selenium:</b> Handles dynamic content, executes JavaScript, simulates real browser behavior.</p>
-        <p><b>Note:</b> BeautifulSoup should be faster but I didn't test both.</p>
+        <p><b>Playwright:</b> Handles dynamic content and executes JavaScript in a managed browser context.</p>
+        <p><b>Note:</b> BeautifulSoup uses direct HTTP requests and is faster when JavaScript is not required.</p>
         """
         
         msg = QMessageBox(self)
@@ -634,10 +574,10 @@ class MainWindow(QMainWindow):
     
     def set_method(self, method):
         """Set the scraping method."""
-        if method and method.lower() in ['beautifulsoup', 'selenium']:
+        if method and method.lower() in ['beautifulsoup', 'playwright']:
             method_map = {
                 'beautifulsoup': 'BeautifulSoup',
-                'selenium': 'Selenium'
+                'playwright': 'Playwright'
             }
             formatted_method = method_map.get(method.lower())
             if formatted_method:
@@ -649,40 +589,23 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Handle the window close event to ensure proper cleanup."""
-        # If a scraper thread is running, stop it
-        if self.scraper_thread and self.scraper_thread.isRunning():
-            logger.info("Application closing: Stopping scraper thread...")
+        # Stop any running operations
+        if self.thread_manager.has_active_threads():
+            logger.info("Application closing: Stopping active operations...")
             try:
-                # Set cancellation flag and start the force quit process
-                self.scraper_thread.stop()
-                
-                # Give a short time for graceful cleanup
-                self.scraper_thread.wait(1000)  # Wait up to 1 second
-                
-                if self.scraper_thread.isRunning():
-                    logger.warning("Thread still running during application shutdown")
-                    # We don't want to block shutdown, so we just log the warning
+                self.bidding_service.cancel()
+                self.thread_manager.stop_all()
             except Exception as e:
-                logger.error(f"Error during shutdown cleanup: {str(e)}")
+                logger.error(f"Error during thread cleanup: {str(e)}")
+        
+        # Clean up service resources
+        try:
+            self.bidding_service.cleanup()
+        except Exception as e:
+            logger.error(f"Error during service cleanup: {str(e)}")
         
         # Save settings
         self._save_settings()
         
         # Accept the close event
         event.accept()
-
-def main(args=None):
-    """Main entry point for the application."""
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    # Apply command line arguments if provided
-    if args:
-        if args.timetable_file:
-            window.set_timetable_file(args.timetable_file)
-        if args.method:
-            window.set_method(args.method)
-        if args.start:
-            # Automatically start the scraping process
-            window._execute_scraping()
-    window.show()
-    sys.exit(app.exec_())

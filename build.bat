@@ -45,9 +45,9 @@ echo.
 echo Usage examples:
 echo   UnitRegTimetable.exe
 echo   UnitRegTimetable.exe --timetable-file MyTimetable.txt
-echo   UnitRegTimetable.exe --method selenium
-echo   UnitRegTimetable.exe --timetable-file MyTimetable.txt --method selenium
-echo   UnitRegTimetable.exe --timetable-file MyTimetable.txt --method selenium --start
+echo   UnitRegTimetable.exe --method playwright
+echo   UnitRegTimetable.exe --timetable-file MyTimetable.txt --method playwright
+echo   UnitRegTimetable.exe --timetable-file MyTimetable.txt --method playwright --start
 echo.
 
 pause

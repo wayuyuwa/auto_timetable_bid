@@ -3,15 +3,8 @@ Timetable reading utility.
 """
 
 import re
-from dataclasses import dataclass
-from typing import Dict, List
-
-@dataclass
-class Course:
-    """Course data class."""
-    code: str
-    name: str
-    slots: Dict[str, List[int]]
+from typing import List
+from ..models.course import Course
 
 class TimetableReader:
     """Timetable reader utility."""

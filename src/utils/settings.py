@@ -87,7 +87,7 @@ class Settings:
         Returns:
             str: Last used method
         """
-        return self.settings.get('method', 'Selenium')
+        return self.settings.get('method', 'BeautifulSoup')
     
     def get_headless_mode(self) -> bool:
         """

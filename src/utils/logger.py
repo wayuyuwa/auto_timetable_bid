@@ -4,7 +4,6 @@ Logging configuration for the UTAR Course Registration Scraper.
 
 import logging
 import logging.handlers
-import os
 import sys
 import traceback
 from .config import LOG_LEVEL, LOG_FORMAT, LOG_FILE, ERROR_LOG_FILE

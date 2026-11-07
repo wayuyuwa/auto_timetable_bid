@@ -5,7 +5,7 @@
 > **DISCLAIMER**: This project is created for **EDUCATIONAL PURPOSES ONLY**. It demonstrates web scraping, automation, and GUI development concepts. Users are responsible for ensuring their use of this tool complies with UTAR's terms of service and policies. The developers are not responsible for any misuse or consequences arising from the use of this tool.
 
 An educational project demonstrating web scraping and automation techniques using Python. This project showcases:
-- Web scraping with BeautifulSoup and Selenium
+- Web scraping with BeautifulSoup and Playwright
 - GUI development with PyQt5
 - CAPTCHA solving
 - Automated browser interaction
@@ -16,7 +16,7 @@ An educational project demonstrating web scraping and automation techniques usin
 
 - **Dual Scraping Methods**:
   - BeautifulSoup for lightweight scraping
-  - Selenium for full browser automation with CAPTCHA handling
+  - Playwright for full browser automation with CAPTCHA handling
 - **Automated Course Registration**:
   - Support for timetable-based course registration
   - Automatic slot selection based on preferences
@@ -25,7 +25,7 @@ An educational project demonstrating web scraping and automation techniques usin
   - Modern PyQt5-based interface
   - Settings persistence
   - Progress feedback
-  - Collapsible Selenium options
+  - Collapsible Playwright options
 - **Additional Features**:
   - Secure credential storage
   - CAPTCHA solving using ddddocr
@@ -35,10 +35,10 @@ An educational project demonstrating web scraping and automation techniques usin
 
 - Python 3.8+
 - PyQt5
-- Selenium
+- Playwright
 - BeautifulSoup4
 - ddddocr
-- Firefox WebDriver (for Selenium)
+- Chromium (installed by Playwright)
 
 ## Installation
 
@@ -59,10 +59,10 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. Download Firefox WebDriver:
-   - Visit [Mozilla GeckoDriver releases](https://github.com/mozilla/geckodriver/releases)
-   - Download the appropriate version for your system
-   - Add the driver to your system PATH
+4. Install the Playwright browser:
+```bash
+python -m playwright install chromium
+```
 
 ## Usage (For Learning Purposes)
 
@@ -72,10 +72,10 @@ python src/main.py
 ```
 
 2. Configure settings:
-   - Select scraping method (BeautifulSoup or Selenium)
+  - Select scraping method (BeautifulSoup or Playwright)
    - Enter your UTAR credentials
    - (Optional) Select timetable file
-   - (Optional) Configure Selenium options (headless mode)
+  - (Optional) Configure Playwright options (headless mode)
 
 3. Start scraping:
    - Click "Execute Scraping" to begin
@@ -99,7 +99,7 @@ src/
 │   └── __init__.py
 ├── scrapers/
 │   ├── beautifulsoup_scraper.py
-│   ├── selenium_scraper.py
+│   ├── playwright_scraper.py
 │   └── __init__.py
 ├── utils/
 │   ├── captcha_solver.py   # CAPTCHA solving utility

@@ -12,7 +12,8 @@ from PyQt5.QtGui import QIcon, QFont
 import json
 import os
 import csv
-from ..utils.timetable_reader import TimetableReader, Course
+from ..utils.timetable_reader import TimetableReader
+from ..models.course import Course
 from ..utils.logger import setup_logger
 from ..utils.config import BASE_DIR
 

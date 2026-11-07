@@ -79,8 +79,8 @@ def create_default_config() -> configparser.ConfigParser:
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9'
     }
     
-    # Default Selenium Settings
-    config['Selenium'] = {
+    # Default Playwright Settings
+    config['Playwright'] = {
         'options': 'disable-gpu,no-sandbox,disable-dev-shm-usage',
         'wait_time_very_short': '1',
         'wait_time_short': '3',
@@ -120,11 +120,11 @@ DEFAULT_HEADERS = {
     'Accept': config['Headers']['accept']
 }
 
-# Selenium Settings
-SELENIUM_OPTIONS = config['Selenium']['options'].split(',')
-WAIT_TIME_VERY_SHORT = float(config['Selenium']['wait_time_very_short'])
-WAIT_TIME_SHORT = float(config['Selenium']['wait_time_short'])
-WAIT_TIME_LONG = float(config['Selenium']['wait_time_long'])
+# Playwright Settings
+PLAYWRIGHT_ARGS = config['Playwright']['options'].split(',')
+WAIT_TIME_VERY_SHORT = float(config['Playwright']['wait_time_very_short'])
+WAIT_TIME_SHORT = float(config['Playwright']['wait_time_short'])
+WAIT_TIME_LONG = float(config['Playwright']['wait_time_long'])
 
 # GUI Settings
 WINDOW_TITLE = config['GUI']['window_title']
