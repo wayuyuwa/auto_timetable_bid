@@ -2,6 +2,7 @@
 Bidding service layer - handles all bidding operations with proper signal/slot architecture.
 """
 
+from threading import Event
 from typing import List, Optional
 from ..models.course import Course
 from ..models.bid_result import BidResult, BidStatus
@@ -33,6 +34,7 @@ class BiddingService:
 
         self._scraper: Optional[BeautifulSoupScraper | PlaywrightScraper] = None
         self._is_running = False
+        self._cancel_requested = Event()
         self._scraper_type = "BeautifulSoup"
         self._headless_mode = False
         logger.info("BiddingService initialized")
@@ -117,7 +119,12 @@ class BiddingService:
         """
         try:
             self._is_running = True
-            
+
+            if self._was_cancelled():
+                logger.info("Bidding not started: cancellation was requested")
+                self.operation_cancelled.emit()
+                return
+
             if not self._scraper or not self._scraper.is_logged_in():
                 self.bid_all_completed.emit(False, [])
                 logger.error("Not logged in - cannot bid courses")
@@ -130,10 +137,10 @@ class BiddingService:
             results = []
             
             for i, course in enumerate(courses):
-                if not self._is_running or self._scraper.is_cancelled():
+                if self._was_cancelled():
                     logger.info("Bidding cancelled by user")
                     self.operation_cancelled.emit()
-                    break
+                    return  # a cancelled run must not also report completion
                 
                 current = i + 1
                 self.bid_progress.emit(
@@ -166,6 +173,11 @@ class BiddingService:
                     logger.info(f"Course {course.code}: {status.value}")
                     
                 except Exception as course_error:
+                    if self._was_cancelled():
+                        # The scraper aborted this course because the user pressed stop.
+                        logger.info(f"Bidding cancelled by user during {course.code}")
+                        self.operation_cancelled.emit()
+                        return
                     logger.error(f"Error bidding {course.code}: {course_error}")
                     result = BidResult(
                         course_code=course.code,
@@ -199,12 +211,17 @@ class BiddingService:
     def cancel(self):
         """Cancel ongoing operations."""
         logger.info("Cancellation requested")
+        self._cancel_requested.set()
         self._is_running = False
         if self._scraper:
             self._scraper.cancel()
 
+    def _was_cancelled(self) -> bool:
+        return self._cancel_requested.is_set() or bool(self._scraper and self._scraper.is_cancelled())
+
     def reset_cancellation(self):
         """Clear cancellation state before starting a new operation."""
+        self._cancel_requested.clear()
         if self._scraper:
             self._scraper.reset_cancellation()
     
