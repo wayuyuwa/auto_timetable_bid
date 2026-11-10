@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -11,6 +12,7 @@ import webview
 
 from .models.course import Course
 from .services.bidding_service import BiddingService
+from .storage.database import CourseRepository, Database
 from .utils.config import BASE_DIR
 from .utils.timetable_reader import TimetableReader
 from .utils.logger import setup_logger
@@ -21,9 +23,11 @@ logger = setup_logger(__name__)
 class DesktopApi:
     """Small local API exposed to Vue through pywebview."""
 
-    def __init__(self):
+    def __init__(self, database=None):
+        # Courses live in SQLite; the old JSON file is imported once if the table is empty.
         self.courses_file = os.path.join(BASE_DIR, "data", "courses.json")
-        os.makedirs(os.path.dirname(self.courses_file), exist_ok=True)
+        self.course_repo = CourseRepository(database or Database())
+        self.course_repo.migrate_from_json(self.courses_file)
         self.service = BiddingService()
         self.service.login_progress.connect(self._on_login_progress)
         self.service.login_completed.connect(self._on_login_completed)
@@ -51,11 +55,8 @@ class DesktopApi:
 
     def _load_courses(self):
         try:
-            if not os.path.exists(self.courses_file):
-                return []
-            with open(self.courses_file, "r", encoding="utf-8") as file:
-                return [Course(**course) for course in json.load(file)]
-        except (OSError, ValueError, TypeError) as error:
+            return self.course_repo.list_courses()
+        except (sqlite3.Error, ValueError, TypeError) as error:
             logger.error("Failed to load courses: %s", error)
             return []
 
@@ -64,8 +65,7 @@ class DesktopApi:
 
     def save_courses(self, courses):
         parsed = [Course(**course) for course in courses]
-        with open(self.courses_file, "w", encoding="utf-8") as file:
-            json.dump([course.__dict__ for course in parsed], file, indent=4)
+        self.course_repo.replace_courses(parsed)
         self._courses = parsed
         return self.get_courses()
 

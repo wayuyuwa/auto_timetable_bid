@@ -1,38 +1,37 @@
 """
-Settings manager for the UTAR Course Registration Scraper.
+Settings manager for the UTAR Course Registration Scraper, backed by SQLite.
 """
 
-import json
-import os
 from typing import Optional, Dict, Any
+
+from ..storage.database import Database, SettingsRepository
 
 class Settings:
     """Settings manager for the application."""
-    
+
     def __init__(self, settings_file: str = "user_settings.json"):
         """
         Initialize the settings manager.
-        
+
         Args:
-            settings_file (str): Path to the settings file
+            settings_file (str): Legacy JSON settings file, imported once into SQLite
         """
         self.settings_file = settings_file
+        self.database = Database()
+        self.repo = SettingsRepository(self.database)
+        self.repo.migrate_from_json(self.settings_file)
         self.settings = self._load_settings()
-    
+
     def _load_settings(self) -> Dict[str, Any]:
         """
-        Load settings from file.
-        
+        Load settings from SQLite.
+
         Returns:
             Dict[str, Any]: Settings dictionary
         """
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, 'r') as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                return self._get_default_settings()
-        return self._get_default_settings()
+        settings = self._get_default_settings()
+        settings.update(self.repo.load_settings())
+        return settings
     
     def _get_default_settings(self) -> Dict[str, Any]:
         """
@@ -49,9 +48,8 @@ class Settings:
         }
     
     def save_settings(self):
-        """Save settings to file."""
-        with open(self.settings_file, 'w') as f:
-            json.dump(self.settings, f, indent=4)
+        """Save settings to SQLite."""
+        self.repo.save_settings(self.settings)
     
     def get_student_id(self) -> str:
         """

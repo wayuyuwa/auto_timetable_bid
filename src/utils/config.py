@@ -103,7 +103,11 @@ def create_default_config() -> configparser.ConfigParser:
         'level': 'INFO',
         'format': '%%(asctime)s - %%(name)s - %%(levelname)s - %%(message)s'
     }
-    
+
+    config['Storage'] = {
+        'sqlite_db_path': 'data/app.db'
+    }
+
     return config
 
 # Load configuration
@@ -156,6 +160,10 @@ else:
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'scraper.log')
 ERROR_LOG_FILE = os.path.join(LOG_DIR, 'error.log')
+
+# Storage
+_sqlite_db_raw = config['Storage']['sqlite_db_path'] if config.has_section('Storage') else 'data/app.db'
+SQLITE_DB_PATH = _sqlite_db_raw if os.path.isabs(_sqlite_db_raw) else os.path.join(BASE_DIR, _sqlite_db_raw)
 
 # Create logs directory if it doesn't exist
 os.makedirs(LOG_DIR, exist_ok=True)
