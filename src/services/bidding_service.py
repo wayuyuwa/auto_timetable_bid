@@ -152,7 +152,14 @@ class BiddingService:
                 # Perform the actual bidding through the scraper
                 try:
                     result_text, success = self._scraper.register_courses([course])
-                    
+
+                    if not success and self._was_cancelled():
+                        # Unsuccessful because the user stopped mid-request (e.g. the
+                        # Playwright scraper returns a timeout result instead of raising).
+                        logger.info(f"Bidding cancelled by user during {course.code}")
+                        self.operation_cancelled.emit()
+                        return
+
                     # Create result object
                     if success:
                         status = BidStatus.SUCCESS
