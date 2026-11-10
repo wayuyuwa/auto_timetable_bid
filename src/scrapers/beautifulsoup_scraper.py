@@ -6,13 +6,14 @@ import requests
 from bs4 import BeautifulSoup
 import urllib3
 import socket
+import os
 from time import sleep
 from threading import Event, Lock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from ..utils.config import (
     BASE_URL, LOGIN_URL, LOGIN_PROCESS_URL, REGISTRATION_URL,
-    HOME_URL, COURSE_REGISTRATION_URL, DEFAULT_HEADERS
+    HOME_URL, COURSE_REGISTRATION_URL, REGISTER_UNIT_PRO_URL, DEFAULT_HEADERS
 )
 from ..utils.captcha_solver import CaptchaSolver
 from ..utils.logger import setup_logger
@@ -382,7 +383,7 @@ class BeautifulSoupScraper:
                     # Solve CAPTCHA using CaptchaSolver
                     try:
                         self._check_cancellation()
-                        captcha_solution = self.captcha_solver.solve(captcha_response.content)
+                        captcha_solution = os.getenv("UTAR_MOCK_CAPTCHA") or self.captcha_solver.solve(captcha_response.content)
                         logger.info(f'CAPTCHA solved: {captcha_solution}')
                     except ConnectionError as ce:
                         logger.warning(f"Connection error during CAPTCHA solving: {str(ce)}")
@@ -847,7 +848,7 @@ class BeautifulSoupScraper:
             
             # Send the bidding request
             response = self.session.post(
-                'https://unitreg.utar.edu.my/portal/courseRegStu/registration/registerUnitProSurvey.jsp',
+                REGISTER_UNIT_PRO_URL,
                 headers=headers,
                 data=data_bundle,
                 verify=False,
@@ -907,6 +908,11 @@ class BeautifulSoupScraper:
             logger.info("Session cancelled successfully.")
         except Exception as e:
             logger.error(f"Error cancelling session: {str(e)}")
+
+    def cleanup(self):
+        """Close the HTTP session and release scraper state."""
+        self.cancel()
+        self.reset_cancellation()
 
     def set_max_retries(self, max_retries: int):
         """

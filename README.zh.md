@@ -35,7 +35,10 @@
 ## 系统要求
 
 - Python 3.8+
+- Node.js 18+ 和 npm（用于构建Vue前端）
 - PyQt5
+- pywebview
+- Playwright和Chromium
 - Playwright
 - BeautifulSoup4
 - ddddocr
@@ -58,12 +61,34 @@ source venv/bin/activate  # Windows系统: venv\Scripts\activate
 3. 安装依赖：
 ```bash
 pip install -r requirements.txt
+cd web
+npm install
+npm run build
+cd ..
 ```
 
 4. 安装Playwright浏览器：
 ```bash
 python -m playwright install chromium
 ```
+
+## Mock服务器集成测试
+
+在第一个终端启动本地Mock服务器：
+
+```powershell
+python -m src.mock_server --scenario success
+```
+
+在第二个终端设置应用使用Mock服务器：
+
+```powershell
+$env:UTAR_BASE_URL = "http://127.0.0.1:8765/portal/courseRegStu"
+$env:UTAR_MOCK_CAPTCHA = "mock"
+python main.py
+```
+
+可用场景包括：`success`、`register-fail`、`timeout`和`session-expired`。
 
 ## 使用方法
 

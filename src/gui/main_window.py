@@ -8,9 +8,10 @@ import logging
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QPushButton, QLabel, QComboBox, 
                            QLineEdit, QTextEdit, QMessageBox, QFileDialog,
-                           QCheckBox, QGroupBox, QTabWidget, QToolButton, QStyle)
+                           QCheckBox, QGroupBox, QTabWidget, QToolButton, QStyle,
+                           QTableWidget, QTableWidgetItem, QHeaderView)
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QColor
 from ..services.bidding_service import BiddingService
 from ..services.worker_thread import WorkerThreadManager
 from ..models.course import Course
@@ -68,6 +69,7 @@ class MainWindow(QMainWindow):
         
         # Initialize course list
         self.courses = []
+        self._course_rows = {}
         
         self._setup_ui()
         self._setup_logging()
@@ -222,9 +224,25 @@ class MainWindow(QMainWindow):
         # Course management group
         course_group = QGroupBox("Course Management")
         course_layout = QVBoxLayout()
+
+        self.course_summary = QLabel()
+        self.course_summary.setWordWrap(True)
+        course_layout.addWidget(self.course_summary)
+
+        self.course_preview = QTableWidget(0, 4)
+        self.course_preview.setHorizontalHeaderLabels(["Course", "Name", "Preferred slots", "Status"])
+        self.course_preview.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.course_preview.setSelectionMode(QTableWidget.NoSelection)
+        self.course_preview.verticalHeader().setVisible(False)
+        self.course_preview.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.course_preview.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.course_preview.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.course_preview.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.course_preview.setMaximumHeight(180)
+        course_layout.addWidget(self.course_preview)
         
         # Course management button
-        manage_courses_btn = QPushButton("Manage Courses")
+        manage_courses_btn = QPushButton("Open Course Manager")
         manage_courses_btn.clicked.connect(self._open_course_manager)
         manage_courses_btn.setStyleSheet("""
             QPushButton {
@@ -361,9 +379,9 @@ class MainWindow(QMainWindow):
         self.pw_input.setText(self.settings.get_password())
         self.method_combo.setCurrentText(self.settings.get_method())
         self.headless_checkbox.setChecked(self.settings.get_headless_mode())
-        print(str(self.settings.get_max_retries()))
         self.retry_combo.setCurrentText(str(self.settings.get_max_retries()))
         self._on_method_changed(self.method_combo.currentText())
+        self._refresh_course_preview()
     
     def _save_settings(self):
         """Save current settings."""
@@ -453,6 +471,7 @@ class MainWindow(QMainWindow):
     def _on_bidding_started(self, total: int):
         """Handle bidding start."""
         self.results_display.append(f"\n[BIDDING] Starting to bid {total} courses...\n")
+        self._set_course_statuses("Waiting")
     
     def _on_bid_progress(self, message: str, current: int, total: int):
         """Handle bidding progress updates."""
@@ -462,6 +481,8 @@ class MainWindow(QMainWindow):
         """Handle individual course bidding completion."""
         status_symbol = "✓" if result.is_successful() else "✗"
         self.results_display.append(f"  {status_symbol} {result.course_code}: {result.message}")
+        status = "Success" if result.is_successful() else "Not registered"
+        self._set_course_status(result.course_code, status, result.message)
     
     def _on_bidding_completed(self, success: bool, results: list):
         """Handle overall bidding completion."""
@@ -501,6 +522,39 @@ class MainWindow(QMainWindow):
         self.results_display.append("\n[CANCELLED] Operation cancelled by user.")
         self.execute_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+
+    def _refresh_course_preview(self):
+        """Refresh the compact course and outcome preview on the main window."""
+        self.course_preview.setRowCount(0)
+        self._course_rows.clear()
+        self.course_summary.setText(
+            f"{len(self.courses)} course(s) ready. Open Course Manager to add, edit, import, or reorder courses."
+            if self.courses else
+            "No courses loaded yet. Open Course Manager to import a timetable or add a course."
+        )
+        for course in self.courses:
+            row = self.course_preview.rowCount()
+            self.course_preview.insertRow(row)
+            self._course_rows[course.code] = row
+            values = [course.code, course.name, course.get_slot_display(), "Ready"]
+            for column, value in enumerate(values):
+                self.course_preview.setItem(row, column, QTableWidgetItem(value))
+
+    def _set_course_statuses(self, status: str):
+        """Set the same status for every course before a run starts."""
+        for course in self.courses:
+            self._set_course_status(course.code, status, "")
+
+    def _set_course_status(self, course_code: str, status: str, message: str):
+        """Update one course row without replacing the user's preview."""
+        row = self._course_rows.get(course_code)
+        if row is None:
+            return
+        item = self.course_preview.item(row, 3)
+        item.setText(status)
+        item.setForeground(QColor("#18794e" if status == "Success" else "#9a3412" if status == "Not registered" else "#475569"))
+        if message:
+            item.setToolTip(message)
     
     def _open_course_manager(self):
         """Open the course manager dialog."""
@@ -511,6 +565,7 @@ class MainWindow(QMainWindow):
     def _on_courses_updated(self, courses):
         """Handle course updates."""
         self.courses = courses
+        self._refresh_course_preview()
         logger.info(f"Courses updated: {len(courses)} courses loaded")
 
     def _show_method_info(self):

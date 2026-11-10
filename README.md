@@ -34,11 +34,12 @@ An educational project demonstrating web scraping and automation techniques usin
 ## Requirements
 
 - Python 3.8+
+- Node.js 18+ and npm (to build the Vue frontend)
 - PyQt5
-- Playwright
+- pywebview
+- Playwright and Chromium
 - BeautifulSoup4
 - ddddocr
-- Chromium (installed by Playwright)
 
 ## Installation
 
@@ -57,12 +58,42 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 3. Install dependencies:
 ```bash
 pip install -r requirements.txt
+cd web
+npm install
+npm run build
+cd ..
 ```
 
 4. Install the Playwright browser:
 ```bash
 python -m playwright install chromium
 ```
+
+## Mock server integration testing
+
+Run the local UTAR-compatible mock server in one terminal:
+
+```powershell
+python -m src.mock_server --scenario success
+```
+
+In a second terminal, point the app to it. The CAPTCHA override avoids loading OCR during this test:
+
+```powershell
+$env:UTAR_BASE_URL = "http://127.0.0.1:8765/portal/courseRegStu"
+$env:UTAR_MOCK_CAPTCHA = "mock"
+python main.py
+```
+
+Use a different scenario when starting the mock server:
+
+```powershell
+python -m src.mock_server --scenario register-fail
+python -m src.mock_server --scenario timeout --delay 15
+python -m src.mock_server --scenario session-expired
+```
+
+Unset `UTAR_BASE_URL` and `UTAR_MOCK_CAPTCHA` to return to the real UTAR endpoints. The mock server is local-only and does not contact UTAR.
 
 ## Usage (For Learning Purposes)
 
@@ -72,7 +103,8 @@ python src/main.py
 ```
 
 2. Configure settings:
-  - Select scraping method (BeautifulSoup or Playwright)
+  - Enter your student ID and password
+  - Select BeautifulSoup or Playwright
    - Enter your UTAR credentials
    - (Optional) Select timetable file
   - (Optional) Configure Playwright options (headless mode)
@@ -100,6 +132,7 @@ src/
 ├── scrapers/
 │   ├── beautifulsoup_scraper.py
 │   ├── playwright_scraper.py
+│   ├── html_parser.py
 │   └── __init__.py
 ├── utils/
 │   ├── captcha_solver.py   # CAPTCHA solving utility
@@ -108,6 +141,10 @@ src/
 │   ├── timetable_reader.py # Timetable parsing
 │   └── __init__.py
 └── main.py                # Application entry point
+
+web/
+├── src/                    # Vue frontend
+└── dist/                   # Production bundle loaded by pywebview
 ```
 
 ## Security Notes

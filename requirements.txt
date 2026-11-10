@@ -3,5 +3,6 @@ Pillow>=12.1.0
 numpy>=1.24.0
 PyQt5>5.15.11
 playwright>=1.50.0
+pywebview>=5.4.0
 beautifulsoup4>=4.14.3
 requests>=2.32.5

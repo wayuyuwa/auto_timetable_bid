@@ -203,6 +203,11 @@ class BiddingService(QObject):
         self._is_running = False
         if self._scraper:
             self._scraper.cancel()
+
+    def reset_cancellation(self):
+        """Clear cancellation state before starting a new operation."""
+        if self._scraper:
+            self._scraper.reset_cancellation()
     
     def cleanup(self):
         """Clean up resources."""

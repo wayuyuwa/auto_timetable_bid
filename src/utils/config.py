@@ -51,11 +51,14 @@ def load_config() -> configparser.ConfigParser:
     if not config_path:
         logger.warning(f"Configuration file not found in any of the possible locations")
         logger.warning("Using default configuration values")
-        # Create a default config object
-        return create_default_config()
-    
-    logger.info(f"Loading configuration from: {config_path}")
-    config.read(config_path)
+        config = create_default_config()
+    else:
+        logger.info(f"Loading configuration from: {config_path}")
+        config.read(config_path)
+
+    mock_base_url = os.getenv("UTAR_BASE_URL")
+    if mock_base_url:
+        config["URLs"]["base_url"] = mock_base_url.rstrip("/")
     return config
 
 def create_default_config() -> configparser.ConfigParser:
@@ -113,6 +116,7 @@ LOGIN_PROCESS_URL = config['URLs']['login_process_url'] # Route for login form p
 REGISTRATION_URL = config['URLs']['registration_url']
 HOME_URL = config['URLs']['home_url']
 COURSE_REGISTRATION_URL = config['URLs']['course_registration_url']
+REGISTER_UNIT_PRO_URL = f"{BASE_URL}/registration/registerUnitProSurvey.jsp"
 
 # Headers
 DEFAULT_HEADERS = {

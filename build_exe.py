@@ -10,6 +10,16 @@ import platform
 
 def build_executable():
     """Build the executable using PyInstaller."""
+    frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+    frontend_index = os.path.join(frontend_dir, "dist", "index.html")
+    if not os.path.exists(frontend_index):
+        npm = shutil.which("npm")
+        if not npm:
+            raise RuntimeError("npm is required to build the Vue frontend")
+        print("Building Vue frontend...")
+        subprocess.check_call([npm, "install"], cwd=frontend_dir)
+        subprocess.check_call([npm, "run", "build"], cwd=frontend_dir)
+
     # Ensure PyInstaller is installed
     try:
         import PyInstaller
@@ -61,6 +71,7 @@ def build_executable():
     cmd.extend([
         f"--add-data=src{sep}src",  # Include source files
         f"--add-data=resources{sep}resources",  # Include resources
+        f"--add-data=web{sep}web",  # Include the Vue frontend
     ])
     
     # Add ddddocr model file if found
@@ -77,6 +88,7 @@ def build_executable():
         "--hidden-import=requests",
         "--hidden-import=bs4",
         "--hidden-import=playwright",
+        "--hidden-import=webview",
         "--hidden-import=ddddocr",
     ])
     

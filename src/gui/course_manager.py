@@ -67,10 +67,10 @@ class CourseManager(QDialog):
                 if event.mimeData().hasUrls() and len(event.mimeData().urls()) == 1:
                     file_path = event.mimeData().urls()[0].toLocalFile()
                     self.setText(file_path)
-                    self.parent().parent()._process_imported_file(file_path)
+                    self.window()._process_imported_file(file_path)
                     event.acceptProposedAction()
         
-        self.import_path = DropLineEdit()
+        self.import_path = DropLineEdit(self)
         self.import_path.setReadOnly(True)
         self.import_path.setPlaceholderText("Drag & drop a TTAP/courses json file here or click Browse...")
         
@@ -188,7 +188,7 @@ class CourseManager(QDialog):
         lecture_layout = QHBoxLayout()
         lecture_layout.addWidget(QLabel("Lecture Slots:"))
         self.lecture_slots = QLineEdit()
-        self.lecture_slots.setPlaceholderText("e.g., 1, 2, 3")
+        self.lecture_slots.setPlaceholderText("Preferred lecture slots, e.g. 1, 2, 3")
         lecture_layout.addWidget(self.lecture_slots)
         slots_layout.addLayout(lecture_layout)
         
@@ -196,7 +196,7 @@ class CourseManager(QDialog):
         tutorial_layout = QHBoxLayout()
         tutorial_layout.addWidget(QLabel("Tutorial Slots:"))
         self.tutorial_slots = QLineEdit()
-        self.tutorial_slots.setPlaceholderText("e.g., 1, 2, 3")
+        self.tutorial_slots.setPlaceholderText("Preferred tutorial slots, e.g. 1, 2, 3")
         tutorial_layout.addWidget(self.tutorial_slots)
         slots_layout.addLayout(tutorial_layout)
         
@@ -204,7 +204,7 @@ class CourseManager(QDialog):
         practical_layout = QHBoxLayout()
         practical_layout.addWidget(QLabel("Practical Slots:"))
         self.practical_slots = QLineEdit()
-        self.practical_slots.setPlaceholderText("e.g., 1, 2, 3")
+        self.practical_slots.setPlaceholderText("Preferred practical slots, e.g. 1, 2, 3")
         practical_layout.addWidget(self.practical_slots)
         slots_layout.addLayout(practical_layout)
         
@@ -214,8 +214,9 @@ class CourseManager(QDialog):
         # Action buttons
         button_layout = QHBoxLayout()
         
-        self.add_button = QPushButton("Add Course")
-        self.add_button.clicked.connect(self._add_course)
+        self.add_button = QPushButton("Save Course")
+        self.add_button.setToolTip("Add a new course or save changes to the selected course")
+        self.add_button.clicked.connect(self._save_course)
         self.add_button.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
@@ -231,7 +232,7 @@ class CourseManager(QDialog):
         
         self.update_button = QPushButton("Update Course")
         self.update_button.clicked.connect(self._update_course)
-        self.update_button.setEnabled(False)
+        self.update_button.setVisible(False)
         self.update_button.setStyleSheet("""
             QPushButton {
                 background-color: #2196F3;
@@ -267,7 +268,8 @@ class CourseManager(QDialog):
             }
         """)
         
-        self.clear_button = QPushButton("Clear")
+        self.clear_button = QPushButton("New Course")
+        self.clear_button.setToolTip("Clear the form and start a new course")
         self.clear_button.clicked.connect(self._clear_inputs)
         self.clear_button.setStyleSheet("""
             QPushButton {
@@ -288,6 +290,7 @@ class CourseManager(QDialog):
         button_layout.addWidget(self.clear_button)
         
         details_layout.addLayout(button_layout)
+        details_layout.addWidget(QLabel("Select a course to edit it, or choose New Course to add one. Changes save automatically."))
         details_group.setLayout(details_layout)
         content_layout.addWidget(details_group)
         
@@ -296,8 +299,8 @@ class CourseManager(QDialog):
         # Bottom buttons
         bottom_layout = QHBoxLayout()
         
-        save_button = QPushButton("Save Changes")
-        save_button.clicked.connect(lambda : self._save_courses(show_message=True))
+        save_button = QPushButton("Save & Close")
+        save_button.clicked.connect(self._save_and_close)
         save_button.setStyleSheet("""
             QPushButton {
                 background-color: #2196F3;
@@ -443,7 +446,15 @@ class CourseManager(QDialog):
         
         self.courses.append(new_course)
         self._populate_course_list()
+        self._save_courses(show_message=False)
         self._clear_inputs()
+
+    def _save_course(self):
+        """Add a course or update the selected course with one action."""
+        if self.selected_course:
+            self._update_course()
+        else:
+            self._add_course()
     
     def _update_course(self):
         """Update the selected course."""
@@ -477,6 +488,7 @@ class CourseManager(QDialog):
         self.selected_course.slots = slots
         
         self._populate_course_list()
+        self._save_courses(show_message=False)
         self._clear_inputs()
     
     def _delete_course(self):
@@ -495,6 +507,7 @@ class CourseManager(QDialog):
         if reply == QMessageBox.Yes:
             self.courses.remove(self.selected_course)
             self._populate_course_list()
+            self._save_courses(show_message=False)
             self._clear_inputs()
     
     def _clear_inputs(self):
@@ -520,6 +533,7 @@ class CourseManager(QDialog):
         if index > 0:
             self.courses[index], self.courses[index - 1] = self.courses[index - 1], self.courses[index]
             self._populate_course_list()
+            self._save_courses(show_message=False)
             self.course_table.selectRow(index - 1)
             if index - 1 == 0:
                 self.move_up_button.setEnabled(False)
@@ -534,6 +548,7 @@ class CourseManager(QDialog):
         if index < len(self.courses) - 1:
             self.courses[index], self.courses[index + 1] = self.courses[index + 1], self.courses[index]
             self._populate_course_list()
+            self._save_courses(show_message=False)
             self.course_table.selectRow(index + 1)
             if index + 1 == len(self.courses) - 1:
                 self.move_down_button.setEnabled(False)
@@ -565,7 +580,8 @@ class CourseManager(QDialog):
                 self.courses = TimetableReader.read_timetable(filename)
                 
             self._populate_course_list()
-            QMessageBox.information(self, "Success", "Courses imported successfully!")
+            self._save_courses(show_message=False)
+            QMessageBox.information(self, "Courses ready", f"Loaded {len(self.courses)} course(s).")
             
         except Exception as e:
             logger.error(f"Failed to import courses: {str(e)}")
@@ -585,7 +601,8 @@ class CourseManager(QDialog):
                 self.courses = TimetableReader.read_timetable(file_path)
                 
             self._populate_course_list()
-            QMessageBox.information(self, "Success", "Courses imported successfully!")
+            self._save_courses(show_message=False)
+            QMessageBox.information(self, "Courses ready", f"Loaded {len(self.courses)} course(s).")
             
         except Exception as e:
             logger.error(f"Failed to process imported file: {str(e)}")
@@ -618,6 +635,11 @@ class CourseManager(QDialog):
                 QMessageBox.warning(self, "Error", f"Failed to save courses: {str(e)}")
             else:
                 logger.error("Failed to save courses without showing message.")
+
+    def _save_and_close(self):
+        """Persist the current list and close the manager."""
+        self._save_courses(show_message=False)
+        self.accept()
     
     def set_courses(self, courses: list):
         """Set the list of courses.
