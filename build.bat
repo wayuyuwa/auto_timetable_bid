@@ -21,16 +21,17 @@ if %ERRORLEVEL% neq 0 (
 
 echo.
 echo Preparing distribution package...
-if exist "dist\config.ini" del "dist\config.ini"
-copy "config.ini" "dist\"
+set "APP_DIR=dist\UnitRegTimetable"
+if exist "%APP_DIR%\config.ini" del "%APP_DIR%\config.ini"
+copy "config.ini" "%APP_DIR%\"
 if %ERRORLEVEL% neq 0 (
     echo Warning: Failed to copy config.ini file.
 )
 
-if exist "dist\resources" rmdir /s /q "dist\resources"
+if exist "%APP_DIR%\resources" rmdir /s /q "%APP_DIR%\resources"
 if exist "resources" (
     echo Copying resources folder...
-    xcopy "resources" "dist\resources\" /E /I /Y
+    xcopy "resources" "%APP_DIR%\resources\" /E /I /Y
     if %ERRORLEVEL% neq 0 (
         echo Warning: Failed to copy resources folder.
     )
@@ -40,7 +41,7 @@ if exist "resources" (
 
 echo.
 echo Build process complete.
-echo Executable and required files can be found in the 'dist' folder.
+echo The app folder is dist\UnitRegTimetable - run UnitRegTimetable.exe inside it.
 echo.
 echo Usage examples:
 echo   UnitRegTimetable.exe

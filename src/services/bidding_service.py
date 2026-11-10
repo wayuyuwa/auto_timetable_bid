@@ -2,36 +2,35 @@
 Bidding service layer - handles all bidding operations with proper signal/slot architecture.
 """
 
-from PyQt5.QtCore import QObject, pyqtSignal
 from typing import List, Optional
 from ..models.course import Course
 from ..models.bid_result import BidResult, BidStatus
 from ..scrapers.beautifulsoup_scraper import BeautifulSoupScraper
 from ..scrapers.playwright_scraper import PlaywrightScraper
 from ..utils.logger import setup_logger
+from ..utils.signals import Signal
 
 logger = setup_logger(__name__)
 
 
-class BiddingService(QObject):
+class BiddingService:
     """Service layer for handling bidding operations."""
-    
-    # Signals for communicating with GUI thread
-    login_progress = pyqtSignal(str)  # Progress message
-    login_completed = pyqtSignal(bool, str)  # success, message
-    
-    bid_started = pyqtSignal(int)  # total courses
-    bid_progress = pyqtSignal(str, int, int)  # message, current, total
-    bid_course_completed = pyqtSignal(BidResult)  # individual course result
-    bid_all_completed = pyqtSignal(bool, list)  # overall success, list of BidResult
-    
-    session_expired = pyqtSignal()
-    network_error = pyqtSignal(str)
-    operation_cancelled = pyqtSignal()
-    
+
     def __init__(self):
         """Initialize the bidding service."""
-        super().__init__()
+        # Signals (slots run on the emitting worker thread)
+        self.login_progress = Signal()  # message
+        self.login_completed = Signal()  # success, message
+
+        self.bid_started = Signal()  # total courses
+        self.bid_progress = Signal()  # message, current, total
+        self.bid_course_completed = Signal()  # BidResult
+        self.bid_all_completed = Signal()  # overall success, list of BidResult
+
+        self.session_expired = Signal()
+        self.network_error = Signal()
+        self.operation_cancelled = Signal()
+
         self._scraper: Optional[BeautifulSoupScraper | PlaywrightScraper] = None
         self._is_running = False
         self._scraper_type = "BeautifulSoup"

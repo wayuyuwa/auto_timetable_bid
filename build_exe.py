@@ -59,7 +59,8 @@ def build_executable():
         "-m",
         "PyInstaller",
         "--name=UnitRegTimetable",
-        "--onefile",  # Create a single executable
+        "--onedir",  # Folder build: no per-launch unpacking of one large exe, so it starts fast
+        "--noconfirm",  # Replace an existing dist/UnitRegTimetable folder
         "--windowed",  # Don't show console window for GUI app
     ]
     
@@ -71,7 +72,7 @@ def build_executable():
     cmd.extend([
         f"--add-data=src{sep}src",  # Include source files
         f"--add-data=resources{sep}resources",  # Include resources
-        f"--add-data=web{sep}web",  # Include the Vue frontend
+        f"--add-data={os.path.join('web', 'dist')}{sep}{os.path.join('web', 'dist')}",  # Built Vue frontend only (not node_modules)
     ])
     
     # Add ddddocr model file if found
@@ -81,15 +82,13 @@ def build_executable():
     
     # Add hidden imports
     cmd.extend([
-        "--hidden-import=PyQt5",
-        "--hidden-import=PyQt5.QtCore",
-        "--hidden-import=PyQt5.QtGui",
-        "--hidden-import=PyQt5.QtWidgets",
         "--hidden-import=requests",
         "--hidden-import=bs4",
         "--hidden-import=playwright",
         "--hidden-import=webview",
         "--hidden-import=ddddocr",
+        # The pywebview app does not use Qt; keep the legacy PyQt5 GUI out of the bundle
+        "--exclude-module=PyQt5",
     ])
     
     # Add main script
@@ -102,7 +101,8 @@ def build_executable():
     try:
         subprocess.check_call(cmd)
         print("\nBuild successful!")
-        print("\nExecutable can be found in the 'dist' folder.")
+        print("\nApp folder: dist/UnitRegTimetable (run UnitRegTimetable.exe inside it;")
+        print("distribute the whole folder, not only the exe).")
         print("\nUsage examples:")
         print("  UnitRegTimetable.exe")
         print("  UnitRegTimetable.exe --timetable-file MyTimetable.txt")

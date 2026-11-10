@@ -31,7 +31,7 @@ jobs:
     - name: Prepare release package
       run: |
         mkdir -p release_package
-        copy dist\UnitRegTimetable.exe release_package\
+        Copy-Item -Path dist\UnitRegTimetable\* -Destination release_package -Recurse
         copy config.ini release_package\
         if (Test-Path resources) { copy-item -Path resources -Destination release_package\resources -Recurse }
         Compress-Archive -Path release_package\* -DestinationPath UnitRegTimetable.zip -Force
