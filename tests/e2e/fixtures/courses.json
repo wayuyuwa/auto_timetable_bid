@@ -1,0 +1,5 @@
+[
+    {"code": "UCCM1353", "name": "Basic Algebra", "slots": {"L": [1], "T": [2, 3]}},
+    {"code": "UALE1083", "name": "English for Academic Purposes", "slots": {"L": [1], "T": [4]}},
+    {"code": "MPU3113", "name": "Hubungan Etnik", "slots": {"L": [2]}}
+]

@@ -1,0 +1,529 @@
+"""
+End-to-end test run with screenshots. No AI involved; run it any time:
+
+    venv\\Scripts\\python tests\\e2e\\run_e2e.py            # build frontend, run all cases
+    venv\\Scripts\\python tests\\e2e\\run_e2e.py --no-build # reuse web/dist
+    venv\\Scripts\\python tests\\e2e\\run_e2e.py --only bs_  # cases whose id contains "bs_"
+    venv\\Scripts\\python tests\\e2e\\run_e2e.py --headed    # watch the UI while it runs
+
+How it works:
+- Builds the Vue app (web/dist) and serves it on a local port.
+- Starts src/mock_server.py in-process (UTAR look-alike, no real UTAR traffic).
+- Opens the UI in Chromium and replaces pywebview's window.pywebview.api with a
+  bridge to the real Python DesktopApi, so UI + backend + scrapers run for real.
+- Every case uses a fresh temporary SQLite database.
+- Writes one PNG per case and report.md to tests/e2e/screenshots/ (gitignored).
+Exit code is 1 if any case fails.
+"""
+
+import argparse
+import functools
+import http.server
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+from http.server import ThreadingHTTPServer
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+E2E_DIR = os.path.join(ROOT, "tests", "e2e")
+FIXTURES = os.path.join(E2E_DIR, "fixtures")
+OUT_DIR = os.path.join(E2E_DIR, "screenshots")
+WEB_DIR = os.path.join(ROOT, "web")
+DIST_DIR = os.path.join(WEB_DIR, "dist")
+
+# Mock delay for the timeout scenario; the BeautifulSoup scraper times out after 10 s.
+TIMEOUT_SCENARIO_DELAY = 12
+RUN_TIMEOUT_SECONDS = 180
+
+MOCK_COURSE = {"code": "MOCK1001", "name": "Mock Course", "slots": {"L": [1], "T": [2]}}
+
+BRIDGE_SCRIPT = """
+(() => {
+  const handler = { get: (_, name) => (...args) => window.__desktopCall(String(name), args) };
+  window.pywebview = { api: new Proxy({}, handler) };
+})();
+"""
+
+
+# ---------------------------------------------------------------- infrastructure
+
+def build_frontend():
+    npm = shutil.which("npm")
+    if not npm:
+        raise RuntimeError("npm is required to build web/ (or pass --no-build)")
+    if not os.path.isdir(os.path.join(WEB_DIR, "node_modules")):
+        subprocess.check_call([npm, "ci", "--no-audit", "--no-fund"], cwd=WEB_DIR)
+    subprocess.check_call([npm, "run", "build"], cwd=WEB_DIR)
+
+
+def start_static_server(directory):
+    handler = functools.partial(QuietStaticHandler, directory=directory)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+class QuietStaticHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+def start_mock_server():
+    from src.mock_server import MockHandler
+
+    class QuietMockHandler(MockHandler):
+        def log_message(self, *args):
+            pass
+
+        def handle(self):
+            try:
+                super().handle()
+            except (ConnectionError, OSError):
+                pass  # client gave up on a delayed response (timeout/cancel cases)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), QuietMockHandler)
+    server.daemon_threads = True
+    server.base_path = "/portal/courseRegStu"
+    server.scenario = "success"
+    server.delay = TIMEOUT_SCENARIO_DELAY
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+class CaseFailed(AssertionError):
+    pass
+
+
+def check(condition, message):
+    if not condition:
+        raise CaseFailed(message)
+
+
+class Harness:
+    """Shared browser, servers, and per-case app instances."""
+
+    def __init__(self, browser, app_url, mock, show_app_browser):
+        self.browser = browser
+        self.app_url = app_url
+        self.mock = mock
+        self.show_app_browser = show_app_browser
+        self.tmp = tempfile.mkdtemp(prefix="utar_e2e_")
+        self.page = None
+        self.api = None
+        self.calls = []
+        self.dry_start = False
+
+    # --- app lifecycle
+    def open_app(self, courses=None, db_name=None, scenario="success"):
+        from src.storage.database import Database
+        from src.web_backend import DesktopApi
+
+        self.close_app()
+        self.mock.scenario = scenario
+        self.calls = []
+        self.dry_start = False
+        db_path = os.path.join(self.tmp, db_name or f"{time.time_ns()}.db")
+        self.db_path = db_path
+        self.api = DesktopApi(database=Database(db_path))
+        if courses is not None:
+            self.api.save_courses(courses)
+        self.page = self.browser.new_page(viewport={"width": 1280, "height": 900})
+        self.page.expose_function("__desktopCall", self._bridge)
+        self.page.add_init_script(BRIDGE_SCRIPT)
+        self.page.goto(self.app_url)
+        self.page.get_by_text("Desktop ready").wait_for(timeout=10_000)
+        return self.page
+
+    def close_app(self):
+        if self.api:
+            self.api.cleanup()
+            self.api = None
+        if self.page:
+            self.page.close()
+            self.page = None
+
+    def _bridge(self, method, args):
+        self.calls.append((method, list(args)))
+        if method.startswith("_") or not callable(getattr(self.api, method, None)):
+            raise RuntimeError(f"Unknown desktop API method: {method}")
+        if method == "start" and self.dry_start:
+            return self.api.get_status()
+        return getattr(self.api, method)(*args)
+
+    # --- UI helpers
+    def notice(self):
+        return self.page.locator(".notice").inner_text().strip()
+
+    def wait_notice(self, text, timeout=10_000):
+        self.page.locator(".notice", has_text=text).wait_for(timeout=timeout)
+
+    def row(self, code):
+        return self.page.locator("tbody tr", has_text=code)
+
+    def fill_course_dialog(self, code="", name="", lecture="", tutorial="", practical=""):
+        page = self.page
+        page.get_by_label("Course code").fill(code)
+        page.get_by_label("Course name").fill(name)
+        page.get_by_label("Lecture slots").fill(lecture)
+        page.get_by_label("Tutorial slots").fill(tutorial)
+        page.get_by_label("Practical slots").fill(practical)
+
+    def fill_credentials(self, student_id="2103370", password="mock-password"):
+        self.page.get_by_label("Student ID").fill(student_id)
+        self.page.get_by_label("Password").fill(password)
+
+    def choose_method(self, method):
+        self.page.get_by_label("Connection method").select_option(method)
+        if method == "Playwright":
+            self.page.get_by_label("Browser visible").set_checked(self.show_app_browser, force=True)
+
+    def wait_run_finished(self, timeout=RUN_TIMEOUT_SECONDS):
+        deadline = time.time() + timeout
+        status = self.api.get_status()
+        while time.time() < deadline:
+            status = self.api.get_status()
+            if not status["running"] and status["phase"] != "idle":
+                break
+            self.page.wait_for_timeout(300)  # keeps the page/bridge event loop running
+        else:
+            raise CaseFailed(f"Run did not finish within {timeout}s; last status {status}")
+        # Let the UI's 700 ms status poll render the final state.
+        self.page.locator(".current-message", has_text=status["message"][:40]).wait_for(timeout=5_000)
+        self.page.wait_for_timeout(300)
+        return status
+
+    def wait_phase(self, phase, timeout=60):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.api.get_status()["phase"] == phase:
+                return
+            self.page.wait_for_timeout(200)
+        raise CaseFailed(f"Phase {phase!r} not reached; status {self.api.get_status()}")
+
+    def shot(self, path):
+        self.page.screenshot(path=path, full_page=True)
+
+
+# ---------------------------------------------------------------- test cases
+# Each case: (id, title, expectation, function(h, shot)) where shot(suffix="") saves a PNG.
+
+CASES = []
+
+
+def case(case_id, title, expectation):
+    def register(func):
+        CASES.append((case_id, title, expectation, func))
+        return func
+    return register
+
+
+@case("ui_01_empty_state", "App loads with empty course list", "Bridge connected, empty-state message shown")
+def _(h, shot):
+    h.open_app(courses=[])
+    shot()
+    check(h.page.get_by_text("Your course list is empty.").is_visible(), "empty state not shown")
+    check("0 course(s) ready." in h.notice(), f"unexpected notice: {h.notice()}")
+
+
+@case("ui_02_add_course_dialog", "Add course dialog", "Dialog opens and accepts input")
+def _(h, shot):
+    h.open_app(courses=[])
+    h.page.get_by_role("button", name="Add course").click()
+    h.fill_course_dialog("UCCD1004", "Programming Concepts", "1, 2", "3", "1")
+    shot()
+    check(h.page.get_by_role("heading", name="Add course").is_visible(), "dialog heading missing")
+
+
+@case("ui_03_add_course_saved", "Save a new course", "Row appears and is stored in SQLite")
+def _(h, shot):
+    h.open_app(courses=[])
+    h.page.get_by_role("button", name="Add course").click()
+    h.fill_course_dialog("uccd1004", "Programming Concepts", "1, 2", "3", "1")
+    h.page.get_by_role("button", name="Save course").click()
+    h.wait_notice("Course list saved.")
+    shot()
+    check(h.row("UCCD1004").is_visible(), "row UCCD1004 missing (code should be upper-cased)")
+    stored = [c.code for c in h.api.course_repo.list_courses()]
+    check(stored == ["UCCD1004"], f"SQLite has {stored}")
+
+
+@case("ui_04_validation_missing_name", "Validation: missing course name", "Error notice, dialog stays open")
+def _(h, shot):
+    h.open_app(courses=[])
+    h.page.get_by_role("button", name="Add course").click()
+    h.fill_course_dialog("UCCD1004", "")
+    h.page.get_by_role("button", name="Save course").click()
+    h.wait_notice("Course code and course name are required.")
+    shot()
+
+
+@case("ui_05_validation_bad_slots", "Validation: non-numeric slots", "Error notice about slot format")
+def _(h, shot):
+    h.open_app(courses=[])
+    h.page.get_by_role("button", name="Add course").click()
+    h.fill_course_dialog("UCCD1004", "Programming Concepts", "1, a")
+    h.page.get_by_role("button", name="Save course").click()
+    h.wait_notice("Slot numbers must be comma-separated numbers")
+    shot()
+
+
+@case("ui_06_validation_duplicate", "Validation: duplicate course code", "Error notice, no second row")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    h.page.get_by_role("button", name="Add course").click()
+    h.fill_course_dialog(MOCK_COURSE["code"], "Again", "1")
+    h.page.get_by_role("button", name="Save course").click()
+    h.wait_notice("is already in your course list.")
+    shot()
+    check(h.page.locator("tbody tr").count() == 1, "duplicate row was added")
+
+
+@case("ui_07_edit_course", "Edit a course", "Name and slots updated in table and SQLite")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    h.row(MOCK_COURSE["code"]).get_by_role("button", name="Edit").click()
+    h.fill_course_dialog(MOCK_COURSE["code"], "Renamed Course", "2", "1, 3", "")
+    h.page.get_by_role("button", name="Save course").click()
+    h.wait_notice("Course list saved.")
+    shot()
+    check("Renamed Course" in h.row(MOCK_COURSE["code"]).inner_text(), "row not renamed")
+    stored = h.api.course_repo.list_courses()[0]
+    check(stored.name == "Renamed Course" and stored.slots == {"L": [2], "T": [1, 3], "P": []},
+          f"SQLite has {stored}")
+
+
+@case("ui_08_remove_dialog", "Remove course: confirmation dialog", "Confirmation dialog names the course")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    h.row(MOCK_COURSE["code"]).get_by_role("button", name="Remove").click()
+    h.page.get_by_role("heading", name=f"Remove {MOCK_COURSE['code']}?").wait_for()
+    shot()
+
+
+@case("ui_09_remove_confirmed", "Remove course: confirmed", "Row removed, empty state, SQLite empty")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    h.row(MOCK_COURSE["code"]).get_by_role("button", name="Remove").click()
+    h.page.get_by_role("button", name="Remove course").click()
+    h.wait_notice("Course list saved.")
+    shot()
+    check(h.page.get_by_text("Your course list is empty.").is_visible(), "empty state not shown")
+    check(h.api.course_repo.list_courses() == [], "SQLite not empty")
+
+
+@case("ui_10_import_txt", "Import timetable .txt", "2 courses parsed with slot preferences")
+def _(h, shot):
+    h.open_app(courses=[])
+    h.page.locator("input[type=file]").set_input_files(os.path.join(FIXTURES, "timetable.txt"))
+    h.wait_notice("Loaded 2 course(s) from timetable.txt.")
+    shot()
+    check(h.row("UCCD1004").is_visible() and h.row("UCCD1024").is_visible(), "imported rows missing")
+    check("L 1, 2" in h.row("UCCD1004").inner_text(), "slots not parsed")
+
+
+@case("ui_11_import_json", "Import courses .json", "3 courses loaded")
+def _(h, shot):
+    h.open_app(courses=[])
+    h.page.locator("input[type=file]").set_input_files(os.path.join(FIXTURES, "courses.json"))
+    h.wait_notice("Loaded 3 course(s) from courses.json.")
+    shot()
+    check(h.page.locator("tbody tr").count() == 3, "expected 3 rows")
+
+
+@case("ui_12_persistence", "Courses persist across restarts (SQLite)", "Reopened app shows saved courses")
+def _(h, shot):
+    h.open_app(courses=[], db_name="persist.db")
+    h.page.locator("input[type=file]").set_input_files(os.path.join(FIXTURES, "courses.json"))
+    h.wait_notice("Loaded 3 course(s)")
+    h.open_app(db_name="persist.db")  # new DesktopApi + new page on the same database
+    h.wait_notice("3 course(s) ready.")
+    shot()
+
+
+@case("start_01_no_credentials", "Start without credentials", "Error asks for student ID and password")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    h.page.get_by_role("button", name="Start registration").click()
+    h.wait_notice("Enter your student ID and password first.")
+    shot()
+    check(not any(m == "start" for m, _ in h.calls), "backend start was called")
+
+
+@case("start_02_no_courses", "Start with no courses", "Error asks to add courses")
+def _(h, shot):
+    h.open_app(courses=[])
+    h.fill_credentials()
+    h.page.get_by_role("button", name="Start registration").click()
+    h.wait_notice("Add or import at least one course first.")
+    shot()
+    check(not any(m == "start" for m, _ in h.calls), "backend start was called")
+
+
+@case("start_03_browser_visible_toggle", "'Browser visible' toggle maps to headless flag",
+      "Unticked sends headless=True, ticked sends headless=False")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    h.dry_start = True
+    h.fill_credentials()
+    h.page.get_by_label("Connection method").select_option("Playwright")
+    toggle = h.page.get_by_label("Browser visible")
+    check(toggle.is_checked(), "toggle should default to ticked (browser visible)")
+    toggle.set_checked(False, force=True)
+    h.page.get_by_role("button", name="Start registration").click()
+    toggle.set_checked(True, force=True)
+    h.page.get_by_role("button", name="Start registration").click()
+    h.page.wait_for_timeout(300)
+    shot()
+    starts = [args for m, args in h.calls if m == "start"]
+    check(len(starts) == 2, f"expected 2 start calls, got {starts}")
+    check(starts[0][3] is True and starts[1][3] is False, f"headless flags were {[s[3] for s in starts]}")
+
+
+def _run_case(method, scenario, student_id, expect_phase, expect_text=None, expect_row=None):
+    def body(h, shot):
+        h.open_app(courses=[MOCK_COURSE], scenario=scenario)
+        h.fill_credentials(student_id=student_id)
+        h.choose_method(method)
+        h.page.get_by_role("button", name="Start registration").click()
+        status = h.wait_run_finished()
+        shot()
+        check(status["phase"] == expect_phase, f"phase {status['phase']!r}, message {status['message']!r}")
+        if expect_text:
+            check(expect_text in status["message"], f"message {status['message']!r}")
+        if expect_row:
+            label = h.row(MOCK_COURSE["code"]).locator(".row-status").inner_text().strip()
+            check(label == expect_row, f"row status {label!r}")
+    return body
+
+
+def _cancel_case(method):
+    def body(h, shot):
+        h.open_app(courses=[MOCK_COURSE], scenario="timeout")
+        h.fill_credentials()
+        h.choose_method(method)
+        h.page.get_by_role("button", name="Start registration").click()
+        h.wait_phase("bidding")
+        h.page.wait_for_timeout(1500)  # registration request is now in flight
+        h.page.get_by_role("button", name="Stop safely").wait_for()
+        shot("_1_running")
+        h.page.get_by_role("button", name="Stop safely").click()
+        status = h.wait_run_finished()
+        shot("_2_stopped")
+        check(status["phase"] == "cancelled", f"phase {status['phase']!r}, message {status['message']!r}")
+    return body
+
+
+for _prefix, _method in (("bs", "BeautifulSoup"), ("pw", "Playwright")):
+    for _suffix, _title, _expect, _fn in (
+        ("01_success", "success", "All courses registered; row shows Success",
+         _run_case(_method, "success", "2103370", "complete", "All courses registered", "Success")),
+        ("02_register_fail", "register-fail", "Run ends with course marked Needs attention",
+         _run_case(_method, "register-fail", "2103370", "error", None, "Needs attention")),
+        ("03_session_expired", "session-expired", "Run ends with a login error",
+         _run_case(_method, "session-expired", "2103370", "error", "Login")),
+        ("04_invalid_credentials", "invalid credentials", "Run ends with a credentials error",
+         _run_case(_method, "success", "invalid", "error", "credentials")),
+        ("05_timeout", "timeout", "Slow server: course marked Needs attention",
+         _run_case(_method, "timeout", "2103370", "error", None, "Needs attention")),
+        ("06_cancel", "Stop safely during slow request", "Run ends as cancelled",
+         _cancel_case(_method)),
+    ):
+        case(f"{_prefix}_{_suffix}", f"{_method}: {_title}", _expect)(_fn)
+
+
+# ---------------------------------------------------------------- runner
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--no-build", action="store_true", help="reuse existing web/dist")
+    parser.add_argument("--only", default="", help="run only case ids containing this text")
+    parser.add_argument("--headed", action="store_true", help="show the test browser")
+    parser.add_argument("--show-app-browser", action="store_true",
+                        help="let the app's own Playwright browser be visible during Playwright cases")
+    args = parser.parse_args()
+
+    os.chdir(ROOT)  # config.ini is resolved from the working directory
+    sys.path.insert(0, ROOT)
+    mock = start_mock_server()
+    os.environ["UTAR_BASE_URL"] = f"http://127.0.0.1:{mock.server_port}{mock.base_path}"
+    os.environ.pop("UTAR_MOCK_CAPTCHA", None)  # exercise the real OCR on the sample captcha
+
+    if not args.no_build:
+        build_frontend()
+    if not os.path.exists(os.path.join(DIST_DIR, "index.html")):
+        raise SystemExit("web/dist/index.html not found; run without --no-build")
+
+    shutil.rmtree(OUT_DIR, ignore_errors=True)
+    os.makedirs(OUT_DIR)
+    static = start_static_server(DIST_DIR)
+    app_url = f"http://127.0.0.1:{static.server_port}/index.html"
+
+    from playwright.sync_api import sync_playwright
+
+    selected = [c for c in CASES if args.only in c[0]]
+    results = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=not args.headed)
+        harness = Harness(browser, app_url, mock, args.show_app_browser)
+        for index, (case_id, title, expectation, func) in enumerate(selected, 1):
+            shots = []
+
+            def shot(suffix="", _id=case_id):
+                path = os.path.join(OUT_DIR, f"{_id}{suffix}.png")
+                harness.shot(path)
+                shots.append(os.path.basename(path))
+
+            started = time.time()
+            print(f"[{index}/{len(selected)}] {case_id} ... ", end="", flush=True)
+            try:
+                func(harness, shot)
+                outcome, detail = "PASS", ""
+            except Exception as error:
+                outcome = "FAIL"
+                detail = str(error) if isinstance(error, CaseFailed) else traceback.format_exc(limit=3)
+                if harness.page and not shots:
+                    try:
+                        shot("_failure")
+                    except Exception:
+                        pass
+            elapsed = time.time() - started
+            print(f"{outcome} ({elapsed:.1f}s){' - ' + detail.splitlines()[0] if detail else ''}")
+            results.append((case_id, title, expectation, outcome, detail, shots, elapsed))
+        harness.close_app()
+        browser.close()
+
+    write_report(results)
+    failed = [r for r in results if r[3] == "FAIL"]
+    print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed. Report: {os.path.join(OUT_DIR, 'report.md')}")
+    return 1 if failed else 0
+
+
+def write_report(results):
+    lines = [
+        "# E2E test report",
+        "",
+        f"Generated {time.strftime('%Y-%m-%d %H:%M:%S')} by tests/e2e/run_e2e.py against src/mock_server.py.",
+        "",
+        "| Case | Title | Expected | Result | Time | Screenshots |",
+        "|---|---|---|---|---|---|",
+    ]
+    for case_id, title, expectation, outcome, detail, shots, elapsed in results:
+        links = " ".join(f"[{s}]({s})" for s in shots)
+        lines.append(f"| {case_id} | {title} | {expectation} | {outcome} | {elapsed:.1f}s | {links} |")
+    failures = [r for r in results if r[3] == "FAIL"]
+    if failures:
+        lines += ["", "## Failures", ""]
+        for case_id, _, _, _, detail, _, _ in failures:
+            lines += [f"### {case_id}", "", "```", detail.strip(), "```", ""]
+    with open(os.path.join(OUT_DIR, "report.md"), "w", encoding="utf-8") as file:
+        file.write("\n".join(lines) + "\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
