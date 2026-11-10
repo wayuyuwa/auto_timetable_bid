@@ -179,3 +179,4 @@ geckodriver.log
 chromedriver.log
 # E2E screenshots and report (tests/e2e/run_e2e.py)
 tests/e2e/screenshots/
+!tests/e2e/fixtures/*.txt

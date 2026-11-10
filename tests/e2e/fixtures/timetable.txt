@@ -1,0 +1,10 @@
+UCCD1004
+Programming Concepts and Practices
+L(1 or 2) - Mon 09:00-11:00
+T(3) - Tue 10:00-11:00
+P(1) - Wed 14:00-16:00
+UCCD1024
+Data Structures and Algorithmic Problem Solving
+L(2) - Thu 09:00-11:00
+T(1 or 2) - Fri 10:00-11:00
+P(2) - Fri 14:00-16:00
