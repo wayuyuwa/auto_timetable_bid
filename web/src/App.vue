@@ -22,7 +22,7 @@ const status = reactive({
   results: {},
 });
 const credentials = reactive({ studentId: "", password: "" });
-const options = reactive({ method: "BeautifulSoup", headless: false });
+const options = reactive({ method: "BeautifulSoup", browserVisible: true });
 let pollTimer;
 
 const selectedCourse = computed(() => courses.value.find((course) => course.code === selectedCode.value));
@@ -169,7 +169,7 @@ async function startRun() {
     return;
   }
   try {
-    await callApi("start", credentials.studentId, credentials.password, options.method, options.headless);
+    await callApi("start", credentials.studentId, credentials.password, options.method, !options.browserVisible);
     setNotice("Login started. You can watch each course below.", "info");
   } catch (error) {
     setNotice(error.message, "error");
@@ -241,7 +241,7 @@ onUnmounted(() => {
         <label>Password<input v-model="credentials.password" type="password" autocomplete="current-password" placeholder="Your UTAR password" /></label>
         <div class="field-row">
           <label>Connection method<select v-model="options.method"><option>BeautifulSoup</option><option>Playwright</option></select></label>
-          <label v-if="options.method === 'Playwright'" class="toggle-label"><span>Browser visible</span><input v-model="options.headless" type="checkbox" /><span class="toggle"></span></label>
+          <label v-if="options.method === 'Playwright'" class="toggle-label"><span>Browser visible</span><input v-model="options.browserVisible" type="checkbox" /><span class="toggle"></span></label>
         </div>
         <button class="primary-action" :disabled="status.running" @click="startRun">{{ status.running ? "Registration in progress" : "Start registration" }}</button>
         <button v-if="status.running" class="quiet-action danger" @click="stopRun">Stop safely</button>

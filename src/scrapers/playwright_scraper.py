@@ -1,6 +1,11 @@
 """Playwright implementation for UTAR course registration."""
 
+import functools
 import json
+import queue
+import threading
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from threading import Event
 
 from playwright.sync_api import Error as PlaywrightError
@@ -21,6 +26,72 @@ from .html_parser import parse_home_page
 
 logger = setup_logger(__name__)
 
+# How long cleanup() waits for an in-flight browser operation before giving up.
+CLEANUP_WAIT_SECONDS = 15
+
+
+class _OwnerThread:
+    """Single daemon thread that owns the Playwright sync API objects.
+
+    Playwright's sync API must be used from the thread that started it, but
+    login/bid run on worker threads and cleanup runs on the UI thread, so every
+    browser call is funnelled through this one thread.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._queue = None
+        self._thread = None
+
+    def _ensure_started(self):
+        with self._lock:
+            if self._thread is None:
+                self._queue = queue.Queue()
+                self._thread = threading.Thread(
+                    target=self._run, args=(self._queue,), name="playwright-owner", daemon=True
+                )
+                self._thread.start()
+            return self._queue
+
+    @staticmethod
+    def _run(work_queue):
+        while True:
+            func, future = work_queue.get()
+            if func is None:
+                return
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(func())
+            except BaseException as error:
+                future.set_exception(error)
+
+    def call(self, func, timeout=None):
+        if threading.current_thread() is self._thread:
+            return func()
+        future = Future()
+        self._ensure_started().put((func, future))
+        return future.result(timeout)
+
+    def stop(self):
+        """Let the thread exit after queued work; a later call() starts a new one."""
+        with self._lock:
+            if self._thread is None:
+                return
+            self._queue.put((None, None))
+            self._queue = None
+            self._thread = None
+
+
+def _on_owner_thread(method):
+    """Run a PlaywrightScraper method on its owner thread."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        return self._owner.call(lambda: method(self, *args, **kwargs))
+
+    return wrapper
+
 
 class PlaywrightScraper:
     """Browser scraper with explicit ownership of Playwright resources."""
@@ -37,6 +108,7 @@ class PlaywrightScraper:
         self._is_cleaning_up = False
         self._cancellation_token = Event()
         self._is_logged_in = False
+        self._owner = _OwnerThread()
 
     def set_headless_mode(self, enabled: bool):
         self._headless_mode = enabled
@@ -82,6 +154,7 @@ class PlaywrightScraper:
         self._ensure_page().goto(url, wait_until="domcontentloaded")
         self._check_cancellation()
 
+    @_on_owner_thread
     def login(self, student_id: str, password: str) -> bool:
         if not student_id or not password:
             raise ValueError("Student ID and password are required")
@@ -111,16 +184,19 @@ class PlaywrightScraper:
             logger.error("Playwright login failed: %s", error)
             return False
 
+    @_on_owner_thread
     def get_home_page_data(self):
         page = self._ensure_page()
         self._goto(COURSE_REGISTRATION_URL)
         return parse_home_page(page.content()), self.context.cookies()
 
+    @_on_owner_thread
     def store_cookies(self, path: str = "cookies.txt"):
         if self.context:
             with open(path, "w", encoding="utf-8") as file:
                 json.dump(self.context.cookies(), file)
 
+    @_on_owner_thread
     def register_course(self, course: Course) -> tuple[str, bool]:
         page = self._ensure_page()
         self._goto(COURSE_REGISTRATION_URL)
@@ -169,6 +245,7 @@ class PlaywrightScraper:
             return "Invalid timetable", False
         return f"Registered {course.code}", True
 
+    @_on_owner_thread
     def register_courses(self, courses: list[Course]) -> tuple[str, bool]:
         if not courses:
             return "No courses provided for registration", False
@@ -185,6 +262,16 @@ class PlaywrightScraper:
         return "\n".join(results), success
 
     def cleanup(self):
+        """Close the browser on its owner thread; safe to call from any thread."""
+        self.cancel()  # make an in-flight operation stop at its next checkpoint
+        try:
+            self._owner.call(self._close_browser, timeout=CLEANUP_WAIT_SECONDS)
+        except FutureTimeoutError:
+            logger.warning("Playwright did not shut down within %s s", CLEANUP_WAIT_SECONDS)
+        finally:
+            self._owner.stop()
+
+    def _close_browser(self):
         if self._is_cleaning_up:
             return
         self._is_cleaning_up = True

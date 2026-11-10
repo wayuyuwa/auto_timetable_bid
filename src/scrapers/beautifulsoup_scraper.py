@@ -89,6 +89,14 @@ class BeautifulSoupScraper:
         self._cancellation_token.clear()
         logger.info("Cancellation token reset")
 
+    def is_cancelled(self) -> bool:
+        """Return True when cancellation has been requested."""
+        return self._cancellation_token.is_set()
+
+    def is_logged_in(self) -> bool:
+        """Return True after a successful login."""
+        return self._is_logged_in
+
     def _check_cancellation(self):
         """Check if operation has been cancelled and raise exception if needed."""
         if self._cancellation_token.is_set():

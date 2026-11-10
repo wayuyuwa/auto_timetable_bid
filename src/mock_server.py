@@ -1,19 +1,41 @@
 """Deterministic local UTAR-like server for integration testing."""
 
 import argparse
+import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+# Real sample captcha image so the OCR path runs against a genuine JPEG.
+CAPTCHA_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", "ocr", "Kaptcha.jpg")
 
+# Mirrors the structure of https://unitreg.utar.edu.my/portal/courseRegStu/login.jsp
+# (form name/action, field names, relative captcha src, submit/reset buttons, validate()).
 LOGIN_PAGE = """<!doctype html>
-<html><body>
-<form name="frmParam" action="{base}/loginProSurvey.jsp" method="post">
+<html><head><script>
+function validate(){{
+  with(document.frmParam){{
+    if(reqFregkey.value==''){{ alert("Please key in STUDENT ID"); reqFregkey.focus(); return false; }}
+    if(reqPassword.value==''){{ alert("Please key in PASSWORD"); reqPassword.focus(); return false; }}
+    if(kaptchafield.value!='undefined'){{
+      if(kaptchafield.value==''){{ alert("Please key in the CODE shown"); kaptchafield.focus(); return false; }}
+    }}
+  }}
+  document.frmParam._submit.disabled = true;
+  return true;
+}}
+</script></head>
+<body>
+<form name="frmParam" action="loginProSurvey.jsp" method="post" onSubmit="return validate();">
 <input type="hidden" name="preKap" value="mock-prekap">
-<input name="reqFregkey" value="">
-<input name="reqPassword" value="" type="password">
-<img src="Kaptcha.jpg" alt="captcha">
-<input name="kaptchafield" value="">
+<table>
+<tr><td>Student ID :</td><td><input type="text" name="reqFregkey" maxlength="10" value=""></td></tr>
+<tr><td>Password :</td><td><input type="password" name="reqPassword" maxlength="25" value=""></td></tr>
+<tr><td>Code :</td><td><img width="170" src="../Kaptcha.jpg?tmp={tmp}">
+<br><INPUT type="text" name="kaptchafield" value="" maxlength="5"></td></tr>
+<tr><td colspan="2"><input type="submit" value="Login" name="_submit" class="button">
+<input type="reset" value="Reset" name="reset" class="button"></td></tr>
+</table>
 </form>
 </body></html>"""
 
@@ -44,11 +66,12 @@ class MockHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         base = self.mock_server.base_path
         if path == f"{base}/login.jsp":
-            self._send(LOGIN_PAGE.format(base=base))
+            self._send(LOGIN_PAGE.format(tmp=int(time.time() * 1000)))
         elif path.endswith("/Kaptcha.jpg"):
-            self._send(b"mock-captcha", content_type="image/jpeg")
+            with open(CAPTCHA_IMAGE, "rb") as image:
+                self._send(image.read(), content_type="image/jpeg")
         elif path == f"{base}/registration/studentRegistrationSurvey.jsp":
-            self._send(self._home_page(base))
+            self._send(self._home_page(base, unit_lookup=True))
         elif path == f"{base}/registration/registerCourse.jsp":
             self._send(self._home_page(base, register=True))
         else:
@@ -77,26 +100,39 @@ class MockHandler(BaseHTTPRequestHandler):
         else:
             self._send("Not found", status=404)
 
-    def _home_page(self, base, register=False):
+    def _home_page(self, base, register=False, unit_lookup=False):
         register_button = '<input name="Register" value="Register Course">' if register else ""
+        # Unit lookup form used by the Playwright scraper (input#reqUnit, Enter submits).
+        lookup_form = (
+            f'<form name="frmUnit" action="{base}/registration/registerUnitSurvey.jsp" method="post">'
+            '<input type="text" id="reqUnit" name="reqUnit" value=""></form>'
+            if unit_lookup else ""
+        )
         return f"""<html><body>
 <span>Log Out</span>
 <table id="tblGrid"><tr align="left"><td>Student ID</td><td>2103370</td></tr>
 <tr align="left"><td>Total Registered Credit Hour</td><td>18</td></tr></table>
-{register_button}
+{register_button}{lookup_form}
 </body></html>"""
 
     def _unit_page(self, unit_code):
+        base = self.mock_server.base_path
         rows = "".join(
             f'<tr align="center"><td>{unit_code}</td><td>{slot_type}</td><td>{number}</td>'
-            f'<td><input name="reqMid" value="{unit_code}-{slot_type}{number}"></td></tr>'
+            f'<td><input type="checkbox" name="reqMid" value="{unit_code}-{slot_type}{number}"></td></tr>'
             for slot_type in ("L", "T", "P")
             for number in (1, 2, 3)
         )
-        return f"""<html><body><form name="frmSummary">
-<input name="reqFregkey" value="2103370"><input name="reqPaperType" value="M">
-<input name="reqSession" value="202601"><input name="reqSid" value="mock-sid">
-<input name="reqWithClass" value="Y">{rows}<input name="Submit" value="Submit">
+        # register-fail: browser submit shows the alert the Playwright scraper treats as failure.
+        onsubmit = (
+            ' onsubmit="alert(\'Please select a valid class combination\'); return false;"'
+            if self.mock_server.scenario == "register-fail" else ""
+        )
+        return f"""<html><body><form name="frmSummary" action="{base}/registration/registerUnitProSurvey.jsp" method="post"{onsubmit}>
+<input type="hidden" name="reqFregkey" value="2103370"><input type="hidden" name="reqPaperType" value="M">
+<input type="hidden" name="reqSession" value="202601"><input type="hidden" name="reqSid" value="mock-sid">
+<input type="hidden" name="reqWithClass" value="Y"><table>{rows}</table>
+<input type="hidden" name="reqUnit" value="{unit_code}"><input type="submit" name="Submit" value="Submit">
 </form></body></html>"""
 
 
