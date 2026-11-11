@@ -46,12 +46,21 @@ class BeautifulSoupScraper:
         # Configure session with retry strategy
         self.session = requests.Session()
         
-        # Configure retry strategy
+        # Configure retry strategy.
+        # read=0: do NOT retry read timeouts at the adapter level. A hanging
+        # request otherwise blocks ~connection_retries x connection_timeout
+        # (~40s) before the service's cancellation check runs, so "Stop safely"
+        # feels unresponsive. Connection-drop retries are kept for resilience,
+        # and register_courses() has its own cancellation-aware retry loop for
+        # transient failures.
         retry_strategy = Retry(
             total=connection_retries,
+            connect=connection_retries,
+            read=0,
             backoff_factor=0.5,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"]
+            allowed_methods=["GET", "POST"],
+            raise_on_status=False,
         )
         
         # Mount adapter with retry strategy
