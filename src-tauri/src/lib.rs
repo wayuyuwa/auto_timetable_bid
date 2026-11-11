@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod models;
 mod ocr;
+mod scraper_browser;
 mod scraper_http;
 mod state;
 mod storage;

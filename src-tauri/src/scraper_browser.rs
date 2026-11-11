@@ -59,14 +59,9 @@ impl BrowserScraper {
         let (browser, mut handler) = Browser::launch(config)
             .await
             .map_err(|e| BrowserError::Launch(e.to_string()))?;
-        // Drive the CDP event loop in the background.
-        let _handler = tokio::spawn(async move {
-            while let Some(event) = handler.next().await {
-                if event.is_err() {
-                    break;
-                }
-            }
-        });
+        // Drive the CDP event loop in the background. Keep polling even if an
+        // individual event errors; only stop when the stream ends (browser gone).
+        let _handler = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
         let page = browser.new_page("about:blank").await?;
         Ok(BrowserScraper {
@@ -228,7 +223,9 @@ impl BrowserScraper {
     fn capture_next_dialog(&self) -> JoinHandle<Option<String>> {
         let page = self.page.clone();
         tokio::spawn(async move {
-            use chromiumoxide::cdp::browser_protocol::page::EventJavascriptDialogOpening;
+            use chromiumoxide::cdp::browser_protocol::page::{
+                EventJavascriptDialogOpening, HandleJavaScriptDialogParams,
+            };
             let mut events = match page.event_listener::<EventJavascriptDialogOpening>().await {
                 Ok(e) => e,
                 Err(_) => return None,
@@ -236,7 +233,7 @@ impl BrowserScraper {
             match tokio::time::timeout(Duration::from_secs(3), events.next()).await {
                 Ok(Some(ev)) => {
                     let message = ev.message.clone();
-                    page.handle_dialog(true, None).await.ok();
+                    page.execute(HandleJavaScriptDialogParams::new(true)).await.ok();
                     Some(message)
                 }
                 _ => None,
@@ -289,6 +286,8 @@ fn find_browser() -> Option<PathBuf> {
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
                 if name.starts_with("chromium-") {
+                    // Playwright layout changed from chrome-win to chrome-win64.
+                    candidates.push(e.path().join("chrome-win64").join("chrome.exe"));
                     candidates.push(e.path().join("chrome-win").join("chrome.exe"));
                 }
             }
@@ -301,4 +300,67 @@ fn find_browser() -> Option<PathBuf> {
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
     ));
     candidates.into_iter().find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Course;
+    use std::collections::BTreeMap;
+    use std::net::TcpStream;
+    use std::process::{Child, Command};
+    use std::time::{Duration, Instant};
+
+    struct Mock {
+        child: Child,
+    }
+    impl Drop for Mock {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+        }
+    }
+
+    fn start_mock(port: u16, scenario: &str) -> Mock {
+        let child = Command::new("../venv/Scripts/python.exe")
+            .args([
+                "-m", "src.mock_server", "--host", "127.0.0.1", "--port",
+                &port.to_string(), "--scenario", scenario,
+            ])
+            .current_dir("..")
+            .spawn()
+            .expect("spawn mock server");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        Mock { child }
+    }
+
+    fn mock_course() -> Course {
+        let mut slots = BTreeMap::new();
+        slots.insert("L".to_string(), vec![1]);
+        slots.insert("T".to_string(), vec![2]);
+        Course { code: "MOCK1001".into(), name: "Mock".into(), slots }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn browser_login_and_register_success() {
+        if find_browser().is_none() {
+            eprintln!("no Chromium/Edge found; skipping browser test");
+            return;
+        }
+        let port = 8810;
+        let _mock = start_mock(port, "success");
+        std::env::set_var("UTAR_BASE_URL", format!("http://127.0.0.1:{port}/portal/courseRegStu"));
+        std::env::set_var("UTAR_MOCK_CAPTCHA", "mock");
+
+        let scraper = BrowserScraper::new(true).await.expect("launch browser");
+        scraper.login("2103370", "pw").await.expect("login");
+        let (msg, ok) = scraper.register_course(&mock_course()).await.expect("register");
+        scraper.close().await;
+        assert!(ok, "expected success, got: {msg}");
+    }
 }

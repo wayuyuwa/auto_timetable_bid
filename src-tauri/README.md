@@ -47,6 +47,37 @@ Point the app at the local mock server instead of real UTAR:
 $env:UTAR_BASE_URL = "http://127.0.0.1:8765/portal/courseRegStu"
 ```
 
+## Runtime dependency: onnxruntime.dll (captcha OCR)
+
+`ort` is built with `load-dynamic`, so the captcha OCR loads `onnxruntime.dll`
+(>= 1.17) at runtime. Provide it one of these ways:
+
+- put `onnxruntime.dll` next to the executable (the default search path), or
+- set `ORT_DYLIB_PATH` to its full path.
+
+A copy ships with the Python onnxruntime package at
+`venv/Lib/site-packages/onnxruntime/capi/onnxruntime.dll`, which is what the
+Rust tests use. A production bundle should include `onnxruntime.dll` beside the
+app binary. The browser and HTTP methods only need it for real captchas; with
+`UTAR_MOCK_CAPTCHA` set (tests) the OCR is skipped.
+
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `UTAR_BASE_URL` | Point at the mock server instead of real UTAR |
+| `UTAR_MOCK_CAPTCHA` | Skip OCR and submit this captcha value (testing) |
+| `ORT_DYLIB_PATH` | Full path to `onnxruntime.dll` |
+| `UTAR_BROWSER_PATH` | Chromium/Edge executable for the browser method |
+| `UTAR_DB_PATH` | Override the SQLite database location |
+
+## Status
+
+Backend verified by `cargo test` against the Python mock server: captcha OCR
+(reads the sample as "3mx54"), the HTTP method (login + register, invalid
+credentials), and the chromiumoxide browser method (login + register). The
+Tauri binary compiles; the GUI window itself has not been launched in CI.
+
 ## Build milestones (how this was assembled)
 
 1. Tauri shell + SQLite storage + commands (course CRUD, import, status).

@@ -130,17 +130,111 @@ where
 }
 
 fn run_browser(
-    _student_id: &str,
-    _password: &str,
-    _headless: bool,
-    _courses: &[Course],
+    student_id: &str,
+    password: &str,
+    headless: bool,
+    courses: &[Course],
     shared: &Arc<Shared>,
 ) {
-    // Implemented in milestone 3 (chromiumoxide).
-    error(
-        shared,
-        "The browser method (chromiumoxide) arrives in milestone 3.",
-    );
+    use crate::scraper_browser::{BrowserError, BrowserScraper};
+
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => return error(shared, &format!("Could not start async runtime: {e}")),
+    };
+
+    rt.block_on(async {
+        shared.update(|s| {
+            s.phase = "login".into();
+            s.message = "Launching browser...".into();
+        });
+
+        let scraper = match BrowserScraper::new(headless).await {
+            Ok(s) => s,
+            Err(e) => return error(shared, &e.to_string()),
+        };
+
+        if shared.is_cancelled() {
+            scraper.close().await;
+            return cancelled(shared);
+        }
+
+        match scraper.login(student_id, password).await {
+            Ok(()) => {}
+            Err(BrowserError::LoginFailed) => {
+                scraper.close().await;
+                return error(shared, &BrowserError::LoginFailed.to_string());
+            }
+            Err(e) => {
+                scraper.close().await;
+                return error(shared, &e.to_string());
+            }
+        }
+
+        let total = courses.len() as u32;
+        shared.update(|s| {
+            s.phase = "bidding".into();
+            s.total = total;
+            s.message = "Login successful. Starting course registration...".into();
+        });
+
+        let mut all_ok = true;
+        for (i, course) in courses.iter().enumerate() {
+            if shared.is_cancelled() {
+                scraper.close().await;
+                return cancelled(shared);
+            }
+            shared.update(|s| {
+                s.phase = "bidding".into();
+                s.completed = i as u32;
+                s.total = total;
+                s.message = format!("Bidding {} - {}", course.code, course.name);
+            });
+
+            let outcome = scraper.register_course(course).await;
+
+            if shared.is_cancelled() {
+                scraper.close().await;
+                return cancelled(shared);
+            }
+
+            let (status, label, message, ok) = match outcome {
+                Ok((_, true)) => (
+                    "success",
+                    "Success",
+                    "Successfully registered".to_string(),
+                    true,
+                ),
+                Ok((msg, false)) => ("failed", "Needs attention", msg, false),
+                Err(e) => ("failed", "Needs attention", e.to_string(), false),
+            };
+            all_ok = all_ok && ok;
+            shared.update(|s| {
+                s.results.insert(
+                    course.code.clone(),
+                    CourseResult {
+                        status: status.into(),
+                        label: label.into(),
+                        message: message.clone(),
+                    },
+                );
+                s.completed = s.results.len() as u32;
+                s.message = message.clone();
+            });
+        }
+
+        scraper.close().await;
+        shared.update(|s| {
+            s.running = false;
+            s.phase = if all_ok { "complete" } else { "error" }.into();
+            s.completed = s.results.len() as u32;
+            s.message = if all_ok {
+                "All courses registered successfully.".into()
+            } else {
+                "Registration finished with items needing attention.".into()
+            };
+        });
+    });
 }
 
 fn error(shared: &Arc<Shared>, message: &str) {
