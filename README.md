@@ -21,11 +21,26 @@ An educational project demonstrating web scraping and automation techniques usin
   - Support for timetable-based course registration
   - Automatic slot selection based on preferences
   - Session management and auto-relogin
-- **User-Friendly GUI**:
-  - Modern PyQt5-based interface
-  - Settings persistence
-  - Progress feedback
-  - Collapsible Playwright options
+- **Timetable plans with fallback**:
+  - Keep several full timetables (Plan A, Plan B, ...). Plans are tried in order
+  - A later plan is used only for courses still missing, and only for classes
+    that are free and do not clash with the timeslots already held
+  - Fallback can run automatically or ask you what to bid first
+- **Verified status**:
+  - After each plan the app reads UTAR's own registered-courses page, so the
+    result (Confirmed / Different group / Not registered) reflects what is
+    really registered, not just the submit response
+  - Shows registered classes, times, rooms and credit hours used
+- **Retry, scheduling and pre-flight**:
+  - Starting again retries only the courses that are still missing
+  - Optional retry on a timer until a class frees up
+  - Start at a set time: logs in shortly before and bids at the exact second
+  - Pre-flight check: verifies login, course codes, groups, availability and
+    clashes without registering anything
+- **Desktop interface**:
+  - Vue frontend shown in a pywebview window
+  - Courses and plans stored in SQLite (`data/app.db`)
+  - Live progress and per-course outcome
 - **Additional Features**:
   - Secure credential storage
   - CAPTCHA solving using ddddocr
@@ -95,24 +110,53 @@ python -m src.mock_server --scenario session-expired
 
 Unset `UTAR_BASE_URL` and `UTAR_MOCK_CAPTCHA` to return to the real UTAR endpoints. The mock server is local-only and does not contact UTAR.
 
+The mock keeps state like the real portal: it records registrations, renders the
+registered-courses page and the unit slot table in the real layout, treats slots
+as full or clashing, and returns the portal's real clash message.
+
+### Automated tests
+
+All tests run against the mock server; none contact UTAR.
+
+```powershell
+# Engine tests: verification, plan fallback, retry, schedule, pre-flight, parsers
+venv\Scripts\python -m unittest tests/test_plan_runner.py
+
+# End-to-end UI run with one screenshot per case (tests/e2e/screenshots/, gitignored)
+venv\Scripts\python tests\e2e\run_e2e.py
+
+# Stress test: repeat + cancel cycles, concurrent load, soak (tests/stress/report.md)
+venv\Scripts\python tests\stress\run_stress.py --quick
+```
+
+### Known limitation: switching groups
+
+UTAR lets you move a registered course to another group without dropping it
+(the edit icon on the registered-courses page, `changeClass.jsp`). The app
+detects when a later plan would need this and reports it, but does not perform
+the switch yet.
+
 ## Usage (For Learning Purposes)
 
 1. Run the application:
 ```bash
-python src/main.py
+python main.py
 ```
 
-2. Configure settings:
-  - Enter your student ID and password
-  - Select BeautifulSoup or Playwright
-   - Enter your UTAR credentials
-   - (Optional) Select timetable file
-  - (Optional) Configure Playwright options (headless mode)
+2. Set up:
+   - Enter your student ID and password
+   - Select BeautifulSoup or Playwright
+   - Add courses to Plan A, or import a timetable `.txt` / `.json`
+   - (Optional) Add backup plans with "Add plan"
+   - (Optional) Choose what happens when a plan cannot be completed, turn on
+     "Retry until registered", or set a start time
 
-3. Start scraping:
-   - Click "Execute Scraping" to begin
-   - Use "Stop" button to safely terminate the process
-   - Monitor progress in the results display
+3. Check and run:
+   - "Run pre-flight check" confirms everything is ready without registering
+   - "Start registration" bids the plans in order
+   - "Stop safely" ends the run
+   - The "Confirmed by UTAR" panel shows what is really registered; if anything
+     is missing, the button becomes "Retry missing courses"
 
 ## Configuration
 
