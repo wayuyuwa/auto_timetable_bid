@@ -194,6 +194,7 @@ class PlanRunner:
 
     # ---- entry points
     def run(self, student_id: str, password: str):
+        final = None
         try:
             if not self.plans:
                 raise RunError("Add or import at least one course first.")
@@ -223,23 +224,28 @@ class PlanRunner:
                 next_retry_at=None,
             )
         except Cancelled:
-            self.board.update(running=False, phase="cancelled", message=CANCELLED_MESSAGE,
+            final = dict(running=False, phase="cancelled", message=CANCELLED_MESSAGE,
                               proposal=None, next_retry_at=None)
         except RunError as error:
-            self.board.update(running=False, phase="error", message=str(error),
+            final = dict(running=False, phase="error", message=str(error),
                               proposal=None, next_retry_at=None)
         except Exception as error:  # noqa: BLE001
             if self._cancel.is_set():
-                self.board.update(running=False, phase="cancelled", message=CANCELLED_MESSAGE,
+                final = dict(running=False, phase="cancelled", message=CANCELLED_MESSAGE,
                                   proposal=None, next_retry_at=None)
             else:
                 logger.exception("Registration run failed")
-                self.board.update(running=False, phase="error", message=f"Unexpected error: {error}",
+                final = dict(running=False, phase="error", message=f"Unexpected error: {error}",
                                   proposal=None, next_retry_at=None)
         finally:
+            # Close the scraper first: once the status says 'finished' the user
+            # may start again immediately, and the old browser must be gone.
             self._cleanup()
+            if final is not None:
+                self.board.update(**final)
 
     def preflight(self, student_id: str, password: str):
+        final = None
         try:
             if not self.plans:
                 raise RunError("Add or import at least one course first.")
@@ -261,17 +267,21 @@ class PlanRunner:
                 preflight={"problems": problems, "warnings": warnings, "checks": report},
             )
         except Cancelled:
-            self.board.update(running=False, phase="cancelled", message="Pre-flight cancelled.")
+            final = dict(running=False, phase="cancelled", message="Pre-flight cancelled.")
         except RunError as error:
-            self.board.update(running=False, phase="error", message=str(error))
+            final = dict(running=False, phase="error", message=str(error))
         except Exception as error:  # noqa: BLE001
             if self._cancel.is_set():
-                self.board.update(running=False, phase="cancelled", message="Pre-flight cancelled.")
+                final = dict(running=False, phase="cancelled", message="Pre-flight cancelled.")
             else:
                 logger.exception("Pre-flight failed")
-                self.board.update(running=False, phase="error", message=f"Unexpected error: {error}")
+                final = dict(running=False, phase="error", message=f"Unexpected error: {error}")
         finally:
+            # Close the scraper first: once the status says 'finished' the user
+            # may start again immediately, and the old browser must be gone.
             self._cleanup()
+            if final is not None:
+                self.board.update(**final)
 
     # ---- login / scheduling
     def _login(self, student_id: str, password: str):

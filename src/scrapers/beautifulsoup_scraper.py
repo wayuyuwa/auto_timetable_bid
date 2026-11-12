@@ -688,7 +688,12 @@ class BeautifulSoupScraper:
                 result_text += "\n"
             
             retry_count += 1
-        
+
+        # A course skipped for a missing/full class never reached the submit;
+        # that is a failure, not a success.
+        if failed_courses:
+            registration_success = False
+
         return result_text, registration_success
 
     def _fetch_student_info(self, unit_code: str) -> dict:

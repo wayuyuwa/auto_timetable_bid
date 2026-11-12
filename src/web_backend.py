@@ -97,7 +97,12 @@ class DesktopApi:
     def _begin(self, method, headless, options, target_name, student_id, password, message):
         with self._lock:
             if self._thread and self._thread.is_alive():
-                raise RuntimeError("A registration run is already in progress")
+                if self._board.snapshot()["running"]:
+                    raise RuntimeError("A registration run is already in progress")
+                # The last run has reported its result and is just winding down.
+                self._thread.join(timeout=10)
+                if self._thread.is_alive():
+                    raise RuntimeError("The previous run is still shutting down. Try again in a moment.")
             self._board = StatusBoard()
             self._board.update(
                 running=True,

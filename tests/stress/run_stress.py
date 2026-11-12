@@ -79,10 +79,11 @@ def make_courses(n):
 
 
 def chrome_proc_count():
+    """Browser processes started by this test (children), not the user's own."""
     count = 0
-    for p in psutil.process_iter(["name"]):
+    for p in psutil.Process().children(recursive=True):
         try:
-            name = (p.info["name"] or "").lower()
+            name = (p.name() or "").lower()
             if "chrome" in name or "headless_shell" in name or "msedge" in name:
                 count += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -136,8 +137,11 @@ class Report:
 
 # --------------------------------------------------------------------- phases
 
-def one_run(DesktopApi, Database, api, method, courses, timeout=120):
+def one_run(DesktopApi, Database, api, method, courses, timeout=120, server=None):
     """Drive a single start->finish run through the real DesktopApi threading path."""
+    if server is not None:
+        from src.mock_server import reset_state
+        reset_state(server)  # registered courses are skipped, so start each run clean
     api.save_courses([c.__dict__ for c in courses])
     api.start("2103370", "pw", method, True)
     deadline = time.time() + timeout
@@ -164,7 +168,7 @@ def phase_repeat_cancel(ctx, method, repeats, cancels):
     ok = 0
     t0 = time.time()
     for i in range(repeats):
-        st = one_run(DesktopApi, Database, api, method, courses)
+        st = one_run(DesktopApi, Database, api, method, courses, server=ctx["server"])
         if st["phase"] == "complete":
             ok += 1
         else:
@@ -179,7 +183,9 @@ def phase_repeat_cancel(ctx, method, repeats, cancels):
     ctx["server"].scenario = "timeout"
     cancel_latencies = []
     cancelled_ok = 0
+    from src.mock_server import reset_state
     for i in range(cancels):
+        reset_state(ctx["server"])
         api.save_courses([c.__dict__ for c in courses])
         api.start("2103370", "pw", method, True)
         # wait until bidding actually starts
@@ -332,7 +338,7 @@ def phase_soak(ctx, method, duration):
     last_run_time = None
     while time.time() - start < duration:
         t0 = time.time()
-        st = one_run(DesktopApi, Database, api, method, courses)
+        st = one_run(DesktopApi, Database, api, method, courses, server=ctx["server"])
         dt = time.time() - t0
         runs += 1
         if st["phase"] == "complete":

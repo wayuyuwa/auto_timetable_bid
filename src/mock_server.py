@@ -148,8 +148,11 @@ class MockHandler(BaseHTTPRequestHandler):
             self._send(self._unit_page(form.get("reqUnit", "MOCK1001")))
         elif path == f"{base}/registration/registerUnitProSurvey.jsp":
             if self.mock_server.scenario == "timeout":
+                # The request hangs and is lost: nothing is registered, so runs
+                # stay deterministic however long the client waits.
                 time.sleep(self.mock_server.delay)
-            if self.mock_server.scenario == "register-fail":
+                self._send("<div class='red'>Mock request timed out</div>")
+            elif self.mock_server.scenario == "register-fail":
                 self._send("<div class='red'>Mock registration failed</div>")
             else:
                 self._send(self._register(form.get("reqUnit", ""), self._form_lists.get("reqMid", [])))

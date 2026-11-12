@@ -120,11 +120,14 @@ class Harness:
         self.dry_start = False
 
     # --- app lifecycle
-    def open_app(self, courses=None, db_name=None, scenario="success"):
+    def open_app(self, courses=None, db_name=None, scenario="success", plans=None, keep_mock_state=False):
+        from src.mock_server import reset_state
         from src.storage.database import Database
         from src.web_backend import DesktopApi
 
         self.close_app()
+        if not keep_mock_state:
+            reset_state(self.mock)  # registrations must not leak between cases
         self.mock.scenario = scenario
         self.calls = []
         self.dry_start = False
@@ -133,6 +136,8 @@ class Harness:
         self.api = DesktopApi(database=Database(db_path))
         if courses is not None:
             self.api.save_courses(courses)
+        if plans is not None:
+            self.api.save_plans(plans)
         self.page = self.browser.new_page(viewport={"width": 1280, "height": 900})
         self.page.expose_function("__desktopCall", self._bridge)
         self.page.add_init_script(BRIDGE_SCRIPT)
@@ -249,7 +254,7 @@ def _(h, shot):
     h.wait_notice("Course list saved.")
     shot()
     check(h.row("UCCD1004").is_visible(), "row UCCD1004 missing (code should be upper-cased)")
-    stored = [c.code for c in h.api.course_repo.list_courses()]
+    stored = [c["code"] for c in h.api.get_courses()]
     check(stored == ["UCCD1004"], f"SQLite has {stored}")
 
 
@@ -293,8 +298,8 @@ def _(h, shot):
     h.wait_notice("Course list saved.")
     shot()
     check("Renamed Course" in h.row(MOCK_COURSE["code"]).inner_text(), "row not renamed")
-    stored = h.api.course_repo.list_courses()[0]
-    check(stored.name == "Renamed Course" and stored.slots == {"L": [2], "T": [1, 3], "P": []},
+    stored = h.api.get_courses()[0]
+    check(stored["name"] == "Renamed Course" and stored["slots"] == {"L": [2], "T": [1, 3], "P": []},
           f"SQLite has {stored}")
 
 
@@ -314,7 +319,7 @@ def _(h, shot):
     h.wait_notice("Course list saved.")
     shot()
     check(h.page.get_by_text("Your course list is empty.").is_visible(), "empty state not shown")
-    check(h.api.course_repo.list_courses() == [], "SQLite not empty")
+    check(h.api.get_courses() == [], "SQLite not empty")
 
 
 @case("ui_10_import_txt", "Import timetable .txt", "2 courses parsed with slot preferences")
@@ -385,6 +390,194 @@ def _(h, shot):
     check(starts[0][3] is True and starts[1][3] is False, f"headless flags were {[s[3] for s in starts]}")
 
 
+COURSE_A = {"code": "MOCK1001", "name": "Mock Course One", "slots": {"L": [1], "T": [1]}}
+COURSE_B = {"code": "MOCK1002", "name": "Mock Course Two", "slots": {"L": [1], "T": [2]}}
+COURSE_B_ALT = {"code": "MOCK1002", "name": "Mock Course Two", "slots": {"L": [1], "T": [3]}}
+COURSE_C = {"code": "MOCK1003", "name": "Mock Course Three", "slots": {"L": [1]}}
+TWO_PLANS = [
+    {"name": "Plan A", "courses": [COURSE_A, COURSE_B]},
+    {"name": "Plan B", "courses": [COURSE_A, COURSE_B_ALT, COURSE_C]},
+]
+
+
+def _start(h, method="BeautifulSoup"):
+    h.fill_credentials()
+    h.choose_method(method)
+    h.page.get_by_role("button", name="Start registration").click()
+
+
+@case("plans_01_add_plan", "Add a backup plan", "Plan B tab appears and is saved")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    h.page.get_by_role("button", name="Add plan").click()
+    h.wait_notice("Plan B added.")
+    h.page.get_by_role("button", name="Add course").click()
+    h.fill_course_dialog("MOCK1002", "Mock Course Two", "1", "3")
+    h.page.get_by_role("button", name="Save course").click()
+    h.wait_notice("Course list saved.")
+    shot()
+    saved = h.api.get_plans()
+    check([p["name"] for p in saved] == ["Plan A", "Plan B"], f"plans {saved}")
+    check([c["code"] for c in saved[1]["courses"]] == ["MOCK1002"], f"Plan B courses {saved[1]}")
+    check([c["code"] for c in saved[0]["courses"]] == ["MOCK1001"], "Plan A changed")
+
+
+@case("plans_02_fallback_auto", "Plan A slot full: falls back to Plan B automatically",
+      "Missing course is registered from Plan B; nothing dropped")
+def _(h, shot):
+    h.open_app(plans=TWO_PLANS)
+    h.mock.full_slots.add(("MOCK1002", "T", 2))
+    _start(h)
+    status = h.wait_run_finished()
+    shot()
+    check(status["phase"] == "complete", f"phase {status['phase']!r}: {status['message']!r}")
+    result = status["results"]["MOCK1002"]
+    check(result["plan"] == "Plan B" and result["registered"] == "L1 T3", f"result {result}")
+    check(h.mock.registered["MOCK1001"]["classes"] == {"L": 1, "T": 1}, "Plan A course was changed")
+    check("via Plan B" in h.row("MOCK1002").inner_text(), "row does not say it came via Plan B")
+
+
+@case("plans_03_fallback_ask", "Fallback asks before bidding", "Dialog lists Plan B choices; only the ticked one is bid")
+def _(h, shot):
+    h.open_app(plans=TWO_PLANS)
+    h.mock.full_slots.add(("MOCK1002", "T", 2))
+    h.fill_credentials()
+    h.page.get_by_label("If a plan cannot be completed").select_option("ask")
+    h.page.get_by_role("button", name="Start registration").click()
+    h.page.get_by_role("heading", name="Plan B: what should be bid?").wait_for(timeout=20_000)
+    h.page.locator(".proposal-list li", has_text="MOCK1003").get_by_role("checkbox").uncheck()
+    h.page.wait_for_timeout(1600)  # several status polls: the untick must survive them
+    shot("_1_dialog")
+    items = {i["code"]: i["action"] for i in h.api.get_status()["proposal"]["items"]}
+    check(items == {"MOCK1001": "keep", "MOCK1002": "add", "MOCK1003": "add"}, f"proposal {items}")
+    h.page.get_by_role("button", name="Bid selected courses").click()
+    status = h.wait_run_finished()
+    shot("_2_result")
+    check(status["phase"] == "complete", f"phase {status['phase']!r}")
+    check("MOCK1002" in h.mock.registered and "MOCK1003" not in h.mock.registered,
+          f"registered {sorted(h.mock.registered)}")
+
+
+@case("plans_04_fallback_clash", "Fallback skips a class that clashes with a held timeslot",
+      "Clashing Plan B course is skipped with the reason shown")
+def _(h, shot):
+    h.open_app(plans=[
+        {"name": "Plan A", "courses": [COURSE_A, {"code": "MOCK1002", "name": "Mock Course Two", "slots": {"L": [1]}}]},
+        {"name": "Plan B", "courses": [{"code": "MOCK1002", "name": "Mock Course Two", "slots": {"L": [2]}}]},
+    ])
+    h.mock.full_slots.add(("MOCK1002", "L", 1))
+    h.mock.slot_times[("MOCK1001", "L", 1)] = ("Tue", 9, 2)
+    h.mock.slot_times[("MOCK1002", "L", 2)] = ("Tue", 10, 2)
+    _start(h)
+    status = h.wait_run_finished()
+    h.page.get_by_role("tab", name="Plan B").click()
+    shot()
+    result = status["results"]["MOCK1002"]
+    check(status["phase"] == "error" and result["label"] == "Skipped", f"status {status['phase']} {result}")
+    check("clashes with MOCK1001 L1" in result["message"], f"message {result['message']!r}")
+    check("MOCK1002" not in h.mock.registered, "clashing course was registered")
+
+
+@case("status_01_registered_board", "Verified status board", "Registered courses and credit hours read from UTAR's page")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A, COURSE_B])
+    _start(h)
+    status = h.wait_run_finished()
+    h.page.locator(".registered-card", has_text="MOCK1002").wait_for()
+    shot()
+    check(status["credit"] == {"total": "6", "max": "20"}, f"credit {status['credit']}")
+    check(h.page.locator(".registered-card").count() == 2, "expected 2 registered cards")
+    check("6 of 20 credit hours" in h.page.locator(".credit-meter").inner_text(), "credit meter wrong")
+    check(h.row("MOCK1001").locator(".row-status").inner_text().strip() == "Confirmed", "row not Confirmed")
+
+
+@case("status_02_different_group", "Course held in a different group", "Row shows Different group and is not re-bid")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    h.mock.registered["MOCK1001"] = {"name": "MOCK COURSE MOCK1001", "credit": 3.0, "classes": {"L": 1, "T": 3}}
+    _start(h)
+    status = h.wait_run_finished()
+    shot()
+    result = status["results"]["MOCK1001"]
+    check(result["label"] == "Different group" and status["total"] == 0, f"result {result}, total {status['total']}")
+    check(h.mock.registered["MOCK1001"]["classes"] == {"L": 1, "T": 3}, "registration was changed")
+
+
+@case("retry_01_retry_missing", "Retry only the missing course", "Second start skips the registered course and gets the freed one")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A, COURSE_B])
+    h.mock.full_slots.add(("MOCK1002", "T", 2))
+    _start(h)
+    first = h.wait_run_finished()
+    check(first["phase"] == "error", f"first run phase {first['phase']!r}")
+    h.page.get_by_role("button", name="Retry missing courses").wait_for()
+    shot("_1_after_first_run")
+    h.mock.full_slots.clear()
+    previous_board = h.api._board
+    h.page.get_by_role("button", name="Retry missing courses").click()
+    for _ in range(200):  # a new run replaces the status board
+        if h.api._board is not previous_board:
+            break
+        h.page.wait_for_timeout(50)
+    second = h.wait_run_finished()
+    shot("_2_after_retry")
+    check(second["phase"] == "complete", f"retry phase {second['phase']!r}")
+    check(second["total"] == 1, f"retry bid {second['total']} courses, expected 1")
+
+
+@case("retry_02_auto_retry", "Retry until registered", "App retries on a timer and registers once the slot frees up")
+def _(h, shot):
+    h.open_app(courses=[COURSE_B])
+    h.mock.full_slots.add(("MOCK1002", "T", 2))
+    h.fill_credentials()
+    h.page.get_by_label("Retry until registered").set_checked(True, force=True)
+    h.page.get_by_label("Retry every (seconds)").fill("5")
+    h.page.get_by_role("button", name="Start registration").click()
+    h.wait_phase("waiting_retry", timeout=30)
+    h.page.locator(".current-message", has_text="Retrying in").wait_for(timeout=5_000)
+    shot("_1_waiting")
+    h.mock.full_slots.clear()
+    status = h.wait_run_finished()
+    shot("_2_registered")
+    check(status["phase"] == "complete" and status["attempt"] >= 2, f"phase {status['phase']} attempt {status['attempt']}")
+
+
+@case("schedule_01_start_at_time", "Scheduled start", "Logs in, waits, and only bids at the set time")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    h.fill_credentials()
+    h.page.get_by_label("Start at a set time").set_checked(True, force=True)
+    start = time.localtime(time.time() + 8)
+    h.page.get_by_label("Bidding opens at").fill(time.strftime("%H:%M:%S", start))
+    h.page.get_by_role("button", name="Start registration").click()
+    h.wait_phase("scheduled", timeout=10)
+    h.page.locator(".current-message", has_text="Bidding starts at").wait_for(timeout=8_000)
+    shot("_1_waiting")
+    check("MOCK1001" not in h.mock.registered, "bid before the scheduled time")
+    status = h.wait_run_finished()
+    shot("_2_done")
+    check(status["phase"] == "complete", f"phase {status['phase']!r}")
+    check(time.time() >= time.mktime(start), "finished before the scheduled time")
+
+
+@case("preflight_01_report", "Pre-flight check", "Problems and warnings listed; nothing registered")
+def _(h, shot):
+    h.open_app(courses=[
+        COURSE_A,
+        {"code": "NOPE0000", "name": "Unknown Course", "slots": {"L": [1]}},
+        {"code": "MOCK1002", "name": "Mock Course Two", "slots": {"L": [1], "T": [9]}},
+    ])
+    h.mock.unknown_units.add("NOPE0000")
+    h.fill_credentials()
+    h.page.get_by_role("button", name="Run pre-flight check").click()
+    status = h.wait_run_finished()
+    h.page.locator(".preflight li", has_text="NOPE0000").wait_for()
+    shot()
+    check(status["phase"] == "preflight_done", f"phase {status['phase']!r}")
+    check(status["preflight"]["problems"] == 2, f"problems {status['preflight']}")
+    check(h.mock.registered == {}, "pre-flight registered something")
+
+
 def _run_case(method, scenario, student_id, expect_phase, expect_text=None, expect_row=None):
     def body(h, shot):
         h.open_app(courses=[MOCK_COURSE], scenario=scenario)
@@ -421,16 +614,16 @@ def _cancel_case(method):
 
 for _prefix, _method in (("bs", "BeautifulSoup"), ("pw", "Playwright")):
     for _suffix, _title, _expect, _fn in (
-        ("01_success", "success", "All courses registered; row shows Success",
-         _run_case(_method, "success", "2103370", "complete", "All courses registered", "Success")),
-        ("02_register_fail", "register-fail", "Run ends with course marked Needs attention",
-         _run_case(_method, "register-fail", "2103370", "error", None, "Needs attention")),
+        ("01_success", "success", "All courses registered; row shows Confirmed",
+         _run_case(_method, "success", "2103370", "complete", "All courses registered", "Confirmed")),
+        ("02_register_fail", "register-fail", "Run ends with course marked Not registered",
+         _run_case(_method, "register-fail", "2103370", "error", None, "Not registered")),
         ("03_session_expired", "session-expired", "Run ends with a login error",
          _run_case(_method, "session-expired", "2103370", "error", "Login")),
         ("04_invalid_credentials", "invalid credentials", "Run ends with a credentials error",
          _run_case(_method, "success", "invalid", "error", "credentials")),
-        ("05_timeout", "timeout", "Slow server: course marked Needs attention",
-         _run_case(_method, "timeout", "2103370", "error", None, "Needs attention")),
+        ("05_timeout", "timeout", "Slow server: course marked Not registered",
+         _run_case(_method, "timeout", "2103370", "error", None, "Not registered")),
         ("06_cancel", "Stop safely during slow request", "Run ends as cancelled",
          _cancel_case(_method)),
     ):
