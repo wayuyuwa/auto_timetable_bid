@@ -24,6 +24,7 @@ from copy import deepcopy
 from datetime import datetime
 
 from ..models.course import Course
+from ..scrapers.errors import BrowserMissing, InvalidCredentials, LoginError, PortalClosed
 from ..scrapers.html_parser import sessions_clash
 from ..utils.logger import setup_logger
 
@@ -39,7 +40,19 @@ class Cancelled(Exception):
 
 
 class RunError(Exception):
-    """The run cannot continue; the message is shown to the user."""
+    """The run cannot continue; the message is shown to the user.
+
+    source: "login" (shown in the login section) or "run".
+    kind: finer reason, e.g. invalid_credentials, portal_closed, browser_missing.
+    """
+
+    def __init__(self, message, source="run", kind="error"):
+        super().__init__(message)
+        self.source = source
+        self.kind = kind
+
+
+LOG_LIMIT = 200
 
 
 def empty_status() -> dict:
@@ -58,6 +71,22 @@ def empty_status() -> dict:
         "preflight": None,
         "start_at": None,
         "next_retry_at": None,
+        # What is running: "run" or "preflight"; timers use started_at/ended_at (epoch s).
+        "kind": "",
+        "started_at": None,
+        "ended_at": None,
+        # Stop was requested; the run is finishing its current network call.
+        "stopping": False,
+        # Login progress: attempt n of max, reasons of failed attempts.
+        "login": {"attempt": 0, "max": 0, "reasons": []},
+        # Where the last error belongs: "login" or "run"; kind is finer detail.
+        "error_source": None,
+        "error_kind": None,
+        # Pre-flight steps: [{id, label, state, detail, started_at, ended_at}]
+        # state: pending | running | ok | warn | error | skipped
+        "steps": [],
+        # Activity log shown in the Logs tab: [{t, level, text}]
+        "log": [],
     }
 
 
@@ -70,7 +99,22 @@ class StatusBoard:
 
     def update(self, **values):
         with self._lock:
+            message = values.get("message")
+            if message and message != self._data.get("message"):
+                level = "error" if values.get("phase") == "error" else "info"
+                self._append_log(level, message)
+            if values.get("running") is False and self._data.get("running") and "ended_at" not in values:
+                values["ended_at"] = time.time()
             self._data.update(values)
+
+    def _append_log(self, level, text):
+        log = self._data.setdefault("log", [])
+        log.append({"t": time.time(), "level": level, "text": text})
+        del log[:-LOG_LIMIT]
+
+    def log(self, text, level="info"):
+        with self._lock:
+            self._append_log(level, text)
 
     def mutate(self, function):
         with self._lock:
@@ -148,6 +192,11 @@ class PlanRunner:
         self.max_attempts = max(0, int(options.get("max_attempts") or 0))
         self.start_at = options.get("start_at") or None  # epoch seconds
         self.prelogin_seconds = 60
+        # Scheduled runs: keep retrying login (never bidding) until this many
+        # seconds after the start time while the portal looks closed/unreachable.
+        self.login_grace_seconds = 180
+        self.login_retry_seconds = 10
+        self._credentials = None
         self.board = board or StatusBoard()
         self._scraper_factory = scraper_factory
         self._scraper = None
@@ -159,8 +208,11 @@ class PlanRunner:
 
     # ---- control from other threads
     def cancel(self):
+        first = not self._cancel.is_set()
         self._cancel.set()
         self._choice_ready.set()
+        if first and self.board.snapshot()["running"]:
+            self.board.update(stopping=True, message="Stopping... waiting for the current step to finish safely.")
         scraper = self._scraper
         if scraper is not None:
             try:
@@ -192,9 +244,54 @@ class PlanRunner:
             except Exception as error:  # noqa: BLE001
                 logger.error("Error during scraper cleanup: %s", error)
 
+    @staticmethod
+    def _final(phase, message, error=None):
+        values = dict(running=False, phase=phase, message=message, proposal=None,
+                      next_retry_at=None, stopping=False)
+        if error is not None:
+            values.update(error_source=error.source, error_kind=error.kind)
+        return values
+
+    # ---- pre-flight steps
+    def _steps_init(self, steps):
+        self.board.update(steps=[{"id": step_id, "label": label, "state": "pending", "detail": "",
+                                  "started_at": None, "ended_at": None} for step_id, label in steps])
+
+    def _step(self, step_id, state, detail=None):
+        def apply(data):
+            for step in data["steps"]:
+                if step["id"] == step_id:
+                    step["state"] = state
+                    if detail is not None:
+                        step["detail"] = detail
+                    if state == "running":
+                        step["started_at"] = time.time()
+                        step["ended_at"] = None
+                    elif step.get("started_at") and not step.get("ended_at"):
+                        step["ended_at"] = time.time()
+        self.board.mutate(apply)
+
+    def _fail_running_steps(self, state, detail):
+        def apply(data):
+            for step in data["steps"]:
+                if step["state"] == "running":
+                    step["state"] = state
+                    step["detail"] = detail
+                    step["ended_at"] = time.time()
+                elif step["state"] == "pending":
+                    step["state"] = "skipped"
+                    step["detail"] = "Not run because an earlier step did not finish."
+        self.board.mutate(apply)
+
     # ---- entry points
+    def _mark_started(self, kind):
+        snapshot = self.board.snapshot()
+        self.board.update(running=True, kind=snapshot["kind"] or kind,
+                          started_at=snapshot["started_at"] or time.time(), ended_at=None)
+
     def run(self, student_id: str, password: str):
         final = None
+        self._mark_started("run")
         try:
             if not self.plans:
                 raise RunError("Add or import at least one course first.")
@@ -216,27 +313,20 @@ class PlanRunner:
                             f"Retrying in {self.auto_retry_seconds}s...",
                 )
                 self._sleep_until(retry_at)
-            self.board.update(
-                running=False,
-                phase="complete" if complete else "error",
-                message=SUCCESS_MESSAGE if complete else ATTENTION_MESSAGE,
-                proposal=None,
-                next_retry_at=None,
-            )
+            final = self._final("complete" if complete else "error",
+                                SUCCESS_MESSAGE if complete else ATTENTION_MESSAGE)
+            if not complete:
+                final.update(error_source="run", error_kind="incomplete")
         except Cancelled:
-            final = dict(running=False, phase="cancelled", message=CANCELLED_MESSAGE,
-                              proposal=None, next_retry_at=None)
+            final = self._final("cancelled", CANCELLED_MESSAGE)
         except RunError as error:
-            final = dict(running=False, phase="error", message=str(error),
-                              proposal=None, next_retry_at=None)
+            final = self._final("error", str(error), error)
         except Exception as error:  # noqa: BLE001
             if self._cancel.is_set():
-                final = dict(running=False, phase="cancelled", message=CANCELLED_MESSAGE,
-                                  proposal=None, next_retry_at=None)
+                final = self._final("cancelled", CANCELLED_MESSAGE)
             else:
                 logger.exception("Registration run failed")
-                final = dict(running=False, phase="error", message=f"Unexpected error: {error}",
-                                  proposal=None, next_retry_at=None)
+                final = self._final("error", f"Unexpected error: {error}", RunError("", "run", "unexpected"))
         finally:
             # Close the scraper first: once the status says 'finished' the user
             # may start again immediately, and the old browser must be gone.
@@ -245,12 +335,22 @@ class PlanRunner:
                 self.board.update(**final)
 
     def preflight(self, student_id: str, password: str):
+        """Check login, then (if there are plans) codes, groups, availability
+        and clashes. Never bids. Works without any course plan: then only the
+        login and registered-list checks run and the plan checks are skipped."""
         final = None
+        self._mark_started("preflight")
+        self._steps_init([
+            ("login", "Log in to the portal"),
+            ("registered", "Read your registered courses"),
+            ("plans", "Check course codes, groups and free places"),
+            ("clashes", "Check your first choices for clashes"),
+        ])
         try:
-            if not self.plans:
-                raise RunError("Add or import at least one course first.")
+            self._step("login", "running")
             self._login(student_id, password)
-            self.board.update(phase="preflight", message="Checking your plans against the portal...")
+            self._step("login", "ok", "Login works.")
+            self.board.update(phase="preflight", message="Pre-flight: reading your registered courses...")
             report = self._preflight_checks()
             problems = sum(1 for check in report if check["level"] == "error")
             warnings = sum(1 for check in report if check["level"] == "warn")
@@ -258,24 +358,26 @@ class PlanRunner:
                 message = f"Pre-flight found {problems} problem(s) and {warnings} warning(s)."
             elif warnings:
                 message = f"Pre-flight passed with {warnings} warning(s)."
+            elif not self.plans:
+                message = "Pre-flight passed: login works. Course checks were skipped (no course plan yet)."
             else:
                 message = "Pre-flight passed. Everything looks ready."
-            self.board.update(
-                running=False,
-                phase="preflight_done",
-                message=message,
-                preflight={"problems": problems, "warnings": warnings, "checks": report},
-            )
+            final = self._final("preflight_done", message)
+            final["preflight"] = {"problems": problems, "warnings": warnings, "checks": report}
         except Cancelled:
-            final = dict(running=False, phase="cancelled", message="Pre-flight cancelled.")
+            self._fail_running_steps("skipped", "Stopped by you.")
+            final = self._final("cancelled", "Pre-flight cancelled.")
         except RunError as error:
-            final = dict(running=False, phase="error", message=str(error))
+            self._fail_running_steps("error", str(error))
+            final = self._final("error", str(error), error)
         except Exception as error:  # noqa: BLE001
             if self._cancel.is_set():
-                final = dict(running=False, phase="cancelled", message="Pre-flight cancelled.")
+                self._fail_running_steps("skipped", "Stopped by you.")
+                final = self._final("cancelled", "Pre-flight cancelled.")
             else:
                 logger.exception("Pre-flight failed")
-                final = dict(running=False, phase="error", message=f"Unexpected error: {error}")
+                self._fail_running_steps("error", f"Unexpected error: {error}")
+                final = self._final("error", f"Unexpected error: {error}", RunError("", "run", "unexpected"))
         finally:
             # Close the scraper first: once the status says 'finished' the user
             # may start again immediately, and the old browser must be gone.
@@ -284,42 +386,111 @@ class PlanRunner:
                 self.board.update(**final)
 
     # ---- login / scheduling
+    def _login_progress(self, attempt, maximum, previous):
+        reasons = []
+
+        def apply(data):
+            login = data.setdefault("login", {"attempt": 0, "max": 0, "reasons": []})
+            if previous:
+                login["reasons"] = (login.get("reasons") or []) + [previous]
+            login["attempt"], login["max"] = attempt, maximum
+            reasons.extend(login["reasons"])
+
+        self.board.mutate(apply)
+        text = f"Logging in: attempt {attempt}/{maximum}"
+        if previous:
+            text += f" (previous attempt: {previous})"
+        self.board.update(message=text + "...")
+
     def _login(self, student_id: str, password: str):
         self._check_cancel()
-        self.board.update(phase="login", message="Connecting to UTAR course registration system...")
-        self._scraper = self._scraper_factory(self.method, self.headless)
+        self._credentials = (student_id, password)
+        self.board.update(phase="login", message="Connecting to UTAR course registration system...",
+                          login={"attempt": 0, "max": 0, "reasons": []})
+        if self._scraper is None:
+            self._scraper = self._scraper_factory(self.method, self.headless)
         self._scraper.reset_cancellation()
+        if hasattr(self._scraper, "on_login_progress"):
+            self._scraper.on_login_progress = self._login_progress
         try:
             outcome = self._scraper.login(student_id, password)
+        except InvalidCredentials as error:
+            self._check_cancel()
+            raise RunError(str(error), "login", error.kind) from error
+        except LoginError as error:
+            self._check_cancel()
+            if error.attempts:
+                self.board.mutate(lambda data: data["login"].update(reasons=list(error.attempts)))
+            raise RunError(str(error), "login", error.kind) from error
+        except BrowserMissing as error:
+            self._check_cancel()
+            raise RunError(str(error), "login", error.kind) from error
         except Exception as error:  # noqa: BLE001
             self._check_cancel()
-            raise RunError(f"Login error: {error}") from error
+            raise RunError(f"Login error: {error}", "login", "login") from error
         self._check_cancel()
         if outcome is False:
-            raise RunError("Login failed. Please check your credentials.")
+            raise RunError("Login failed. Please check your credentials.", "login", "invalid_credentials")
+        self.board.update(error_source=None, error_kind=None)
 
     def _scheduled_login(self, student_id: str, password: str):
-        """Log in now, or shortly before a scheduled start, then wait for it."""
+        """Log in now, or shortly before a scheduled start, then wait for it.
+
+        Before the registration window opens the portal may accept a login and
+        then answer "session expired" (PortalClosed), or not answer at all.
+        Logging in never submits a bid, so for a scheduled start we keep
+        retrying the login every login_retry_seconds until
+        login_grace_seconds after the start time. Wrong credentials stop at once.
+        """
         start_at = float(self.start_at) if self.start_at else None
         if not start_at or start_at <= time.time():
             self._login(student_id, password)
             return
         when = datetime.fromtimestamp(start_at).strftime("%H:%M:%S")
         self.board.update(phase="scheduled", start_at=start_at,
-                          message=f"Scheduled. Logging in shortly before {when}.")
+                          message=f"Waiting for scheduled start at {when}. Logging in "
+                                  f"{self.prelogin_seconds}s before. Keep the app open.")
         self._sleep_until(start_at - self.prelogin_seconds)
-        self._login(student_id, password)
-        self.board.update(phase="scheduled", message=f"Logged in. Bidding starts at {when}.")
-        self._sleep_until(start_at)
+        give_up_at = start_at + self.login_grace_seconds
+        tries = 0
+        while True:
+            tries += 1
+            try:
+                self._login(student_id, password)
+                break
+            except RunError as error:
+                if error.kind not in ("portal_closed", "portal_unavailable") or time.time() >= give_up_at:
+                    raise
+                retry_at = min(time.time() + self.login_retry_seconds, give_up_at)
+                self.board.update(
+                    phase="scheduled", next_retry_at=retry_at,
+                    message=f"Login try {tries} before the start did not get in ({error.kind.replace('_', ' ')}). "
+                            f"Trying again in {self.login_retry_seconds}s; nothing has been bid.",
+                )
+                self._sleep_until(retry_at)
+        if time.time() < start_at:
+            self.board.update(phase="scheduled", next_retry_at=None,
+                              message=f"Logged in. Bidding starts at {when}. Keep the app open.")
+            self._sleep_until(start_at)
+        self.board.update(phase="verifying", next_retry_at=None, message="Starting: scheduled time reached.")
 
     # ---- registered list
-    def _refresh_registered(self) -> dict:
-        """Read the registered-courses page; returns {code: registered_course}."""
+    def _refresh_registered(self, relogin=True) -> dict:
+        """Read the registered-courses page; returns {code: registered_course}.
+
+        If the session expired (e.g. after logging in early for a scheduled
+        start) log in again once and re-read. Reading this page never bids,
+        so the retry cannot cause a duplicate submission.
+        """
         self._check_cancel()
         try:
             data = self._scraper.get_registered_courses()
         except Exception as error:  # noqa: BLE001
             self._check_cancel()
+            if relogin and self._credentials and "expired" in str(error).lower():
+                self.board.log("Session expired; logging in again before continuing.", "warn")
+                self._login(*self._credentials)
+                return self._refresh_registered(relogin=False)
             raise RunError(f"Could not read your registered courses: {error}") from error
         info = data.get("info") or {}
         self.board.update(
@@ -553,12 +724,24 @@ class PlanRunner:
         def add(level, text):
             checks.append({"level": level, "text": text})
 
+        self._step("registered", "running")
         snapshot = self._refresh_registered()
         credit = self.board.snapshot()["credit"]
+        add("ok", "Login works.")
         if credit.get("total") or credit.get("max"):
             add("info", f"Credit hours registered: {credit.get('total') or '?'} of {credit.get('max') or '?'}.")
-        add("ok", "Login works.")
+        self._step("registered", "ok", f"{len(snapshot)} course(s) registered at UTAR right now.")
 
+        if not self.plans:
+            reason = "No course plan yet. Add or import courses to check them."
+            self._step("plans", "skipped", reason)
+            self._step("clashes", "skipped", reason)
+            add("info", "Course checks skipped: no course plan yet.")
+            return checks
+
+        self._step("plans", "running")
+        self.board.update(message="Pre-flight: checking course codes, groups and free places...")
+        clash_warnings = []
         for plan in self.plans:
             name = plan["name"]
             first_choices = []
@@ -600,6 +783,15 @@ class PlanRunner:
             for position, first in enumerate(first_choices):
                 for second in first_choices[position + 1:]:
                     if first["code"] != second["code"] and sessions_clash(first["sessions"], second["sessions"]):
-                        add("warn", f"{name}: {first['code']} {first['label']} clashes with "
-                                    f"{second['code']} {second['label']}.")
+                        clash_warnings.append(f"{name}: {first['code']} {first['label']} clashes with "
+                                              f"{second['code']} {second['label']}.")
+        errors = sum(1 for check in checks if check["level"] == "error")
+        warns = sum(1 for check in checks if check["level"] == "warn")
+        self._step("plans", "error" if errors else "warn" if warns else "ok",
+                   f"{errors} problem(s), {warns} warning(s)." if errors or warns else "All courses found.")
+        self._step("clashes", "running")
+        for text in clash_warnings:
+            add("warn", text)
+        self._step("clashes", "warn" if clash_warnings else "ok",
+                   f"{len(clash_warnings)} clash(es)." if clash_warnings else "No clashes between first choices.")
         return checks

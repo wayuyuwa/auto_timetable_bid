@@ -345,12 +345,17 @@ class RegistrationClosedTests(RunnerCase):
 
     def test_stop_works_while_login_keeps_failing(self):
         runner, thread = self.start_in_thread([plan("Plan A", course("MOCK1001", L=[1]))])
-        time.sleep(1.5)
+        time.sleep(0.3)
+        still_running = runner.board.snapshot()["running"]
         stopped_at = time.time()
         runner.cancel()
         thread.join(timeout=30)
         self.assertFalse(thread.is_alive(), "Stop did not end the run")
-        self.assertEqual(runner.board.snapshot()["phase"], "cancelled")
+        # Login now gives up after two "closed" answers, so a run can end on
+        # its own before Stop; if it was still running, it must end cancelled.
+        if still_running:
+            self.assertEqual(runner.board.snapshot()["phase"], "cancelled")
+        self.assertFalse(runner.board.snapshot()["stopping"])
         self.assertLess(time.time() - stopped_at, 15)
 
 

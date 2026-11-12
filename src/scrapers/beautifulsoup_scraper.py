@@ -19,6 +19,8 @@ from ..utils.config import (
 from ..utils.captcha_solver import CaptchaSolver
 from ..utils.logger import setup_logger
 from ..models.course import Course
+from ..utils.diagnostics import dump_http
+from .errors import InvalidCredentials, LoginError, PortalClosed, PortalUnavailable
 from .html_parser import (
     find_course_value,
     parse_home_page,
@@ -68,6 +70,9 @@ class BeautifulSoupScraper:
         self._is_logged_in = False
         self._relogin_lock = RLock()  # Lock to prevent multiple relogin attempts
         self._relogin_active = False  # True while a relogin is running
+        self._logging_in = False  # True inside login(); disables nested relogin
+        self._home_data = None
+        self.on_login_progress = None  # optional callback(attempt, max, previous_reason)
         
         logger.info("BeautifulSoupScraper initialized")
 
@@ -326,202 +331,142 @@ class BeautifulSoupScraper:
             # If we get here, it was another exception
             raise Exception(f'Request failed: {str(e)}')
     
-    def login(self, student_id: str, password: str, max_retries: int = 5) -> dict:
+    # Consecutive "login accepted, then session expired" answers after which the
+    # portal is treated as closed (registration not open) instead of retrying on.
+    CLOSED_AFTER = 2
+
+    def _wait(self, seconds: float):
+        """Pause between attempts; returns early (and raises) on cancel."""
+        if self._cancellation_token.wait(seconds):
+            self._check_cancellation()
+
+    def login(self, student_id: str, password: str, max_retries: int = 5, progress=None) -> dict:
         """
-        Handle the login process including CAPTCHA.
-        
-        Args:
-            student_id (str): Student ID for login
-            password (str): Password for login
-            max_retries (int): Maximum number of retry attempts
-            
-        Returns:
-            dict: Dictionary containing login result and student data
-            
-        Raises:
-            Exception: Only for critical issues like invalid credentials or missing required data
+        Log in, solving the CAPTCHA. Retries wrong captchas and transient errors.
+
+        progress(attempt, max_attempts, previous_failure_reason_or_None) is called
+        before each attempt so the UI can show "Login attempt 2/5".
+
+        Raises InvalidCredentials, PortalClosed or PortalUnavailable (all
+        LoginError) with the per-attempt reasons in .attempts.
         """
-        # Critical validation
         if not student_id or not password:
-            raise Exception("Student ID and password are required!")
+            raise InvalidCredentials("Student ID and password are required.")
 
         # Store credentials for potential relogin
         self._student_id = student_id
         self._password = password
         self._is_logged_in = False
-        
-        retry_count = 0
-        while retry_count < max_retries:
-            try:
-                self._check_cancellation()
-                
-                # Get login page
-                logger.info(f"Attempting to get login page (attempt {retry_count+1}/{max_retries})")
-                response = self.session.get(
-                    LOGIN_URL,
-                    headers=self.headers,
-                    verify=False,
-                    timeout=self.connection_timeout,
-                )
-                
-                self._check_cancellation()
-                
-                if response.status_code != 200:
-                    logger.warning(f"Failed to get login page. Status: {response.status_code}")
-                    retry_count += 1
-                    sleep(1)
-                    continue
+        progress = progress or self.on_login_progress
 
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Find CAPTCHA image
-                captcha_img = soup.find('img', {'src': lambda src: src and 'Kaptcha.jpg' in src})
-                if not captcha_img:
-                    logger.warning("CAPTCHA image not found, retrying...")
-                    retry_count += 1
-                    sleep(1)
-                    continue
-                
-                # Get CAPTCHA image
-                captcha_src = captcha_img['src'].lstrip('../')
-                captcha_url = f"{BASE_URL}/../{captcha_src}"
-                
+        reasons = []
+        closed_streak = 0
+        self._logging_in = True
+        try:
+            for attempt in range(1, max_retries + 1):
                 self._check_cancellation()
-                
-                try:
-                    logger.info(f"Attempting to retrieve CAPTCHA image")
-                    captcha_response = self.session.get(
-                        captcha_url,
-                        headers=self.headers,
-                        verify=False,
-                        timeout=self.connection_timeout,
-                    )
-                    
-                    self._check_cancellation()
-                    
-                    if captcha_response.status_code != 200:
-                        logger.warning(f"Failed to retrieve CAPTCHA image from {captcha_url}. Status: {captcha_response.status_code}")
-                        retry_count += 1
-                        sleep(1)
-                        continue
-                    
-                    # Solve CAPTCHA using CaptchaSolver
+                if progress:
                     try:
-                        self._check_cancellation()
-                        captcha_solution = os.getenv("UTAR_MOCK_CAPTCHA") or self.captcha_solver.solve(captcha_response.content)
-                        logger.info(f'CAPTCHA solved: {captcha_solution}')
-                    except ConnectionError as ce:
-                        logger.warning(f"Connection error during CAPTCHA solving: {str(ce)}")
-                        retry_count += 1
-                        sleep(2)  # Slightly longer sleep for connection issues
-                        continue
-                
-                except (requests.RequestException, socket.error) as e:
-                    self._check_cancellation()
-                    logger.warning(f"Network error retrieving CAPTCHA: {str(e)}")
-                    retry_count += 1
-                    sleep(2)
-                    continue
-                
-                self._check_cancellation()
-                
-                # Get preKap value
-                prekap_input = soup.find('input', {'name': 'preKap'})
-                if not prekap_input:
-                    logger.warning("preKap value not found, retrying...")
-                    retry_count += 1
-                    sleep(1)
-                    continue
-                
-                prekap_value = prekap_input.get('value')
-                
-                # Attempt login
-                payload = {
-                    'preKap': prekap_value,
-                    'reqFregkey': student_id,
-                    'reqPassword': password,
-                    'kaptchafield': captcha_solution
-                }
-                
-                self._check_cancellation()
-                
-                login_response = self.session.post(
-                    LOGIN_PROCESS_URL,
-                    headers=self.headers,
-                    data=payload,
-                    verify=False,
-                    timeout=self.connection_timeout
-                )
+                        progress(attempt, max_retries, reasons[-1] if reasons else None)
+                    except Exception:  # noqa: BLE001 - a UI callback must not break login
+                        pass
+                reason, closed = self._login_once(student_id, password, attempt, max_retries)
+                if reason is None:
+                    self._is_logged_in = True
+                    return {"success": "Login successful", "students_data": self._home_data}
+                reasons.append(reason)
+                logger.warning("Login attempt %s/%s failed: %s", attempt, max_retries, reason)
+                closed_streak = closed_streak + 1 if closed else 0
+                if closed_streak >= self.CLOSED_AFTER:
+                    break  # the portal answers consistently; more attempts only waste time
+                if attempt < max_retries:
+                    # Wrong captcha: retry at once. Anything else: short back-off.
+                    self._wait(0 if reason == "Wrong captcha" else min(1.0 * attempt, 3.0))
+        finally:
+            self._logging_in = False
 
-                try:
-                    self._check_session_expired(login_response)
-                except SessionExpiredException:
-                    # If we get a session expired during login, that's unexpected but we should retry
-                    logger.warning("Received session expired during login attempt, retrying...")
-                    retry_count += 1
-                    sleep(1)
-                    continue
-                
-                self._check_cancellation()
-                
-                if 'Invalid code' in login_response.text:
-                    # This is a critical error - invalid credentials
-                    logger.error("Invalid CAPTCHA code entered. Retrying...")
-                    retry_count += 1
-                    continue
-                elif 'Invalid' in login_response.text:
-                    # This is a critical error - invalid credentials
-                    self._is_logged_in = False
-                    raise Exception('Login failed. Please check your credentials.')
-                
-                # Get home page data
-                home_data = self.get_home_page_data()
-                if not home_data:
-                    logger.warning("Failed to get home page data, retrying...")
-                    retry_count += 1
-                    sleep(1)
-                    continue
-                
-                # Set logged in flag
-                self._is_logged_in = True
-                
-                return {
-                    'success': 'Login successful',
-                    'students_data': home_data
-                }
-                
-            except SessionExpiredException:
-                logger.warning("Session expired during login, retrying...")
-                retry_count += 1
-                sleep(1)
-                continue
-            except requests.RequestException as e:
-                logger.warning(f"Request failed: {str(e)}, retrying...")
-                retry_count += 1
-                sleep(1)
-                continue
-            except Exception as e:
-                # Check if it was a cancellation
-                self._check_cancellation()
-                
-                # If we get here, it wasn't a cancellation
-                if "check your credentials" in str(e):
-                    # Re-raise critical errors
-                    self._is_logged_in = False
-                    raise
-                
-                logger.warning(f"Login attempt failed: {str(e)}, retrying...")
-                retry_count += 1
-                sleep(1)
-                continue
-        
-        # If we've exhausted all retries
         self._is_logged_in = False
         self._check_cancellation()
-        raise Exception(
-            f"Login failed after {max_retries} attempt(s). The portal kept returning its "
-            "session-expired page or did not respond; course registration may be closed right now."
-        )
+        summary = "; ".join(f"{index}: {text}" for index, text in enumerate(reasons, 1))
+        if closed_streak >= self.CLOSED_AFTER or (reasons and all("session expired" in r for r in reasons)):
+            raise PortalClosed(
+                f"Login failed after {len(reasons)} attempt(s). The portal accepted the login but "
+                "then answered 'session expired'; course registration may be closed right now. "
+                f"({summary})",
+                reasons,
+            )
+        raise PortalUnavailable(f"Login failed after {len(reasons)} attempt(s). ({summary})", reasons)
+
+    def _login_once(self, student_id, password, attempt, max_retries):
+        """One login attempt. Returns (None, False) on success, else
+        (reason, looks_closed). Raises InvalidCredentials or on cancellation."""
+        try:
+            logger.info("Login attempt %s/%s: loading login page", attempt, max_retries)
+            response = self.session.get(LOGIN_URL, headers=self.headers, verify=False,
+                                        timeout=self.connection_timeout)
+            dump_http("login-page", response)
+            self._check_cancellation()
+            if response.status_code != 200:
+                return f"Login page returned HTTP {response.status_code}", False
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            captcha_img = soup.find('img', {'src': lambda src: src and 'Kaptcha.jpg' in src})
+            prekap_input = soup.find('input', {'name': 'preKap'})
+            if not captcha_img or not prekap_input:
+                return "Login page did not contain the captcha form", False
+
+            captcha_src = captcha_img['src'].lstrip('../')
+            captcha_url = f"{BASE_URL}/../{captcha_src}"
+            captcha_response = self.session.get(captcha_url, headers=self.headers, verify=False,
+                                                timeout=self.connection_timeout)
+            self._check_cancellation()
+            if captcha_response.status_code != 200:
+                return f"Captcha image returned HTTP {captcha_response.status_code}", False
+            captcha_solution = os.getenv("UTAR_MOCK_CAPTCHA") or self.captcha_solver.solve(captcha_response.content)
+            logger.info("Captcha solved: %s", captcha_solution)
+
+            payload = {
+                'preKap': prekap_input.get('value'),
+                'reqFregkey': student_id,
+                'reqPassword': password,
+                'kaptchafield': captcha_solution,
+            }
+            self._check_cancellation()
+            login_response = self.session.post(LOGIN_PROCESS_URL, headers=self.headers, data=payload,
+                                               verify=False, timeout=self.connection_timeout)
+            dump_http("login-submit", login_response, payload)
+            self._check_cancellation()
+            try:
+                self._check_session_expired(login_response)
+            except SessionExpiredException:
+                return "Portal answered session expired at login", True
+
+            if 'Invalid code' in login_response.text:
+                return "Wrong captcha", False
+            if 'Invalid' in login_response.text:
+                self._is_logged_in = False
+                raise InvalidCredentials("Login failed: the portal rejected the student ID or password. "
+                                         "Please check your credentials.")
+
+            try:
+                home_data = self.get_home_page_data()
+            except SessionExpiredException:
+                return "Login accepted, then the portal answered session expired", True
+            if not home_data or not home_data[0]:
+                return "Logged in, but the registration page could not be read", False
+            self._home_data = home_data
+            return None, False
+        except LoginError:
+            raise
+        except requests.Timeout:
+            self._check_cancellation()
+            return f"No response within {self.connection_timeout}s", False
+        except (requests.RequestException, socket.error) as error:
+            self._check_cancellation()
+            return f"Network error: {type(error).__name__}", False
+        except Exception as error:  # noqa: BLE001
+            self._check_cancellation()
+            return str(error) or type(error).__name__, False
 
     def get_home_page_data(self) -> tuple:
         """
@@ -540,6 +485,7 @@ class BeautifulSoupScraper:
                 timeout=self.connection_timeout,
             )
             
+            dump_http("registration-page", response)
             self._check_session_expired(response)
             
             if response.status_code != 200:
@@ -558,6 +504,8 @@ class BeautifulSoupScraper:
             return data, self.session.cookies.get_dict()
             
         except SessionExpiredException:
+            if self._logging_in:
+                raise  # login() decides what to do; never a nested relogin
             # Try to relogin and retry the operation
             if self._try_relogin():
                 logger.info("Retrying get_home_page_data after successful relogin")

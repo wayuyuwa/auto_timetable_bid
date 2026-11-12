@@ -21,7 +21,10 @@ from ..utils.config import (
     WAIT_TIME_LONG,
     WAIT_TIME_SHORT,
 )
+from ..utils.browser_setup import missing_browser_message
+from ..utils.diagnostics import save_screenshot
 from ..utils.logger import setup_logger
+from .errors import BrowserMissing, InvalidCredentials, LoginError, PortalClosed, PortalUnavailable
 from .html_parser import parse_home_page, parse_registered_courses, parse_unit_slots
 
 logger = setup_logger(__name__)
@@ -109,6 +112,7 @@ class PlaywrightScraper:
         self._cancellation_token = Event()
         self._is_logged_in = False
         self._owner = _OwnerThread()
+        self.on_login_progress = None  # optional callback(attempt, max, previous_reason)
 
     def set_headless_mode(self, enabled: bool):
         self._headless_mode = enabled
@@ -140,10 +144,21 @@ class PlaywrightScraper:
 
         self._playwright = sync_playwright().start()
         args = [option for option in PLAYWRIGHT_ARGS if option]
-        self.browser = self._playwright.chromium.launch(
-            headless=self._headless_mode,
-            args=args,
-        )
+        try:
+            self.browser = self._playwright.chromium.launch(
+                headless=self._headless_mode,
+                args=args,
+            )
+        except PlaywrightError as error:
+            # Do not leave the Playwright driver process running.
+            try:
+                self._playwright.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._playwright = None
+            if "Executable doesn't exist" in str(error) or "playwright install" in str(error):
+                raise BrowserMissing(missing_browser_message()) from error
+            raise
         self.context = self.browser.new_context()
         self.page = self.context.new_page()
         self.page.set_default_timeout(WAIT_TIME_LONG * 1000)
@@ -154,35 +169,100 @@ class PlaywrightScraper:
         self._ensure_page().goto(url, wait_until="domcontentloaded")
         self._check_cancellation()
 
+    LOGIN_ATTEMPTS = 3
+    CLOSED_AFTER = 2
+
     @_on_owner_thread
-    def login(self, student_id: str, password: str) -> bool:
+    def login(self, student_id: str, password: str, max_retries: int = None, progress=None) -> bool:
+        """Log in through the real login form. Retries wrong captchas and
+        timeouts; raises InvalidCredentials / PortalClosed / PortalUnavailable."""
         if not student_id or not password:
-            raise ValueError("Student ID and password are required")
+            raise InvalidCredentials("Student ID and password are required.")
 
         self.student_id = student_id
         self.password = password
         self._is_logged_in = False
+        attempts = max_retries or self.LOGIN_ATTEMPTS
+        progress = progress or self.on_login_progress
         page = self._ensure_page()
+        reasons, closed_streak = [], 0
+        for attempt in range(1, attempts + 1):
+            self._check_cancellation()
+            if progress:
+                try:
+                    progress(attempt, attempts, reasons[-1] if reasons else None)
+                except Exception:  # noqa: BLE001
+                    pass
+            reason, closed = self._login_once(page, student_id, password)
+            if reason is None:
+                self._is_logged_in = True
+                return True
+            reasons.append(reason)
+            logger.warning("Playwright login attempt %s/%s failed: %s", attempt, attempts, reason)
+            save_screenshot(page, f"login-attempt-{attempt}")
+            closed_streak = closed_streak + 1 if closed else 0
+            if closed_streak >= self.CLOSED_AFTER:
+                break
+            if attempt < attempts and reason != "Wrong captcha":
+                if self._cancellation_token.wait(min(1.0 * attempt, 3.0)):
+                    self._check_cancellation()
+        self._check_cancellation()
+        summary = "; ".join(f"{index}: {text}" for index, text in enumerate(reasons, 1))
+        if closed_streak >= self.CLOSED_AFTER or (reasons and all("session expired" in r for r in reasons)):
+            raise PortalClosed(
+                f"Login failed after {len(reasons)} attempt(s). The portal accepted the login but "
+                "then answered 'session expired'; course registration may be closed right now. "
+                f"({summary})", reasons)
+        raise PortalUnavailable(f"Login failed after {len(reasons)} attempt(s). ({summary})", reasons)
 
+    @staticmethod
+    def _looks_expired(page) -> bool:
+        try:
+            return "sessionExpired" in page.url or "sessionExpired" in page.content()
+        except PlaywrightError:
+            return False
+
+    def _login_once(self, page, student_id, password):
+        """(None, False) on success, else (reason, looks_closed)."""
         try:
             self._goto(LOGIN_URL)
-            page.locator("form[name=frmParam]").wait_for(state="visible", timeout=WAIT_TIME_SHORT * 1000)
+            page.locator("form[name=frmParam]").wait_for(state="visible", timeout=WAIT_TIME_LONG * 1000)
             page.locator("input[name=reqFregkey]").fill(student_id)
             page.locator("input[name=reqPassword]").fill(password)
             captcha = page.locator("input[name=kaptchafield]").locator("xpath=preceding-sibling::img[1]")
             captcha_bytes = captcha.screenshot()
             page.locator("input[name=kaptchafield]").fill(self.captcha_solver.solve(captcha_bytes))
+            self._check_cancellation()
             page.locator("input[name=kaptchafield]").press("Enter")
-            page.locator("span", has_text="Log Out").wait_for(
-                state="visible", timeout=WAIT_TIME_SHORT * 1000
-            )
-            self._is_logged_in = True
-            return True
+            outcome = page.locator("span:has-text('Log Out'), :text('Invalid')").first
+            try:
+                outcome.wait_for(state="visible", timeout=WAIT_TIME_LONG * 1000)
+            except PlaywrightTimeoutError:
+                self._check_cancellation()
+                if self._looks_expired(page):
+                    return "Portal answered session expired at login", True
+                return f"The portal did not answer within {WAIT_TIME_LONG:g}s", False
+            self._check_cancellation()
+            body = page.content()
+            if "Invalid code" in body:
+                return "Wrong captcha", False
+            if "Invalid" in body and "Log Out" not in body:
+                raise InvalidCredentials("Login failed: the portal rejected the student ID or password. "
+                                         "Please check your credentials.")
+            # Logged in. Outside the registration window the next page answers
+            # "session expired"; find that out now instead of during bidding.
+            self._goto(COURSE_REGISTRATION_URL)
+            if self._looks_expired(page):
+                return "Login accepted, then the portal answered session expired", True
+            return None, False
+        except (LoginError, BrowserMissing):
+            raise
         except PlaywrightTimeoutError:
-            return False
+            self._check_cancellation()
+            return f"The portal did not answer within {WAIT_TIME_LONG:g}s", False
         except PlaywrightError as error:
-            logger.error("Playwright login failed: %s", error)
-            return False
+            self._check_cancellation()
+            return f"Browser error: {str(error).splitlines()[0]}", False
 
     @_on_owner_thread
     def get_home_page_data(self):
@@ -196,6 +276,9 @@ class PlaywrightScraper:
         actually registered. Returns {"courses": [...], "info": {...}}."""
         page = self._ensure_page()
         self._goto(COURSE_REGISTRATION_URL)
+        if self._looks_expired(page):
+            self._is_logged_in = False
+            raise RuntimeError("Session expired")
         html = page.content()
         return {"courses": parse_registered_courses(html), "info": parse_home_page(html)}
 
