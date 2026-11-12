@@ -1,19 +1,22 @@
 """Python API used by the Vue desktop frontend."""
 
+import atexit
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
-from copy import deepcopy
+import time
 
 import webview
 
 from .models.course import Course
 from .services.plan_runner import PlanRunner, StatusBoard
-from .storage.database import CourseRepository, Database, PlanRepository
-from .utils.config import BASE_DIR
+from .storage.database import CourseRepository, Database, PlanRepository, SettingsRepository
+from .utils import browser_setup, secret_store
+from .utils.config import BASE_DIR, LOG_DIR
 from .utils.timetable_reader import TimetableReader
 from .utils.logger import setup_logger
 
@@ -34,6 +37,8 @@ class DesktopApi:
         # Timetable plans (Plan A, B, ...). The legacy single list becomes Plan A.
         self.plan_repo = PlanRepository(database)
         self.plan_repo.ensure_initial_plan(self.course_repo)
+        self.settings_repo = SettingsRepository(database)
+        self._browser_install = {"running": False, "ok": None, "message": ""}
         self._lock = threading.Lock()
         self._thread = None
         self._runner = None
@@ -77,26 +82,123 @@ class DesktopApi:
         self._persist()
         return self.get_courses()
 
-    def import_courses(self, filename, content, plan_index=0):
-        if filename.lower().endswith(".json"):
-            courses = [Course(**course) for course in json.loads(content)]
+    IMPORT_TYPES = (".txt", ".json")
+
+    @classmethod
+    def _parse_import(cls, filename, content):
+        name = str(filename or "")
+        if not name.lower().endswith(cls.IMPORT_TYPES):
+            raise ValueError(f"{name or 'This file'} is not supported. Import a UTAR timetable .txt "
+                             "file or a .json course list.")
+        if not str(content or "").strip():
+            raise ValueError(f"{name} is empty.")
+        try:
+            if name.lower().endswith(".json"):
+                courses = [Course(**course) for course in json.loads(content)]
+            else:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as file:
+                    file.write(content)
+                    temp_path = file.name
+                try:
+                    courses = TimetableReader.read_timetable(temp_path)
+                finally:
+                    os.unlink(temp_path)
+        except (ValueError, TypeError, KeyError) as error:
+            raise ValueError(f"{name} could not be read as a course list: {error}") from error
+        if not courses:
+            raise ValueError(f"No courses were found in {name}.")
+        return courses
+
+    def preview_import(self, filename, content):
+        """Parse a file without saving it, so the UI can ask how to import it."""
+        return [course.__dict__ for course in self._parse_import(filename, content)]
+
+    def import_courses(self, filename, content, plan_index=0, mode="replace", new_name=None):
+        """mode "replace": replace the courses of plan_index.
+        mode "new": add a new plan (named new_name) and keep all existing plans.
+        Returns the full plan list."""
+        courses = self._parse_import(filename, content)
+        if mode == "new":
+            name = str(new_name or "").strip() or f"Plan {chr(ord('A') + len(self._plans))}"
+            self._plans.append({"name": name, "courses": courses})
         else:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as file:
-                file.write(content)
-                temp_path = file.name
-            try:
-                courses = TimetableReader.read_timetable(temp_path)
-            finally:
-                os.unlink(temp_path)
-        plan_index = int(plan_index or 0)
-        if not 0 <= plan_index < len(self._plans):
-            raise ValueError("That plan does not exist")
-        self._plans[plan_index]["courses"] = courses
+            plan_index = int(plan_index or 0)
+            if not 0 <= plan_index < len(self._plans):
+                raise ValueError("That plan does not exist")
+            self._plans[plan_index]["courses"] = courses
         self._persist()
-        return [course.__dict__ for course in courses]
+        return self.get_plans()
+
+    # ------------------------------------------------------- credentials
+    def get_saved_credentials(self):
+        """Saved login for the form. The password is decrypted only here, in
+        memory, and only for this Windows user (DPAPI)."""
+        settings = self.settings_repo.load_settings()
+        remember = settings.get("remember_login", "true") != "false"
+        password = ""
+        stored = settings.get("password_protected", "")
+        if stored:
+            try:
+                password = secret_store.unprotect(stored)
+            except ValueError as error:
+                logger.warning("Saved password could not be decrypted: %s", error)
+        return {
+            "student_id": settings.get("student_id", "") if remember else "",
+            "password": password if remember else "",
+            "remember": remember,
+            "secure_storage": secret_store.available(),
+        }
+
+    def save_credentials(self, student_id, password, remember=True):
+        """Remember the login (password encrypted with DPAPI) or forget it."""
+        values = {"remember_login": "true" if remember else "false", "password": ""}
+        if remember:
+            values["student_id"] = str(student_id or "").strip()
+            values["password_protected"] = (
+                secret_store.protect(str(password)) if password and secret_store.available() else ""
+            )
+        else:
+            values["student_id"] = ""
+            values["password_protected"] = ""
+        self.settings_repo.save_settings(values)
+        return self.get_saved_credentials()
+
+    # ------------------------------------------------------- browser
+    def browser_status(self):
+        status = browser_setup.chromium_status()
+        status["install"] = dict(self._browser_install)
+        return status
+
+    def install_browser(self):
+        if self._browser_install["running"]:
+            return self.browser_status()
+        self._browser_install = {"running": True, "ok": None, "message": "Starting download..."}
+
+        def work():
+            def output(line):
+                self._browser_install["message"] = line[-160:]
+
+            ok, last = browser_setup.install_chromium(on_output=output)
+            self._browser_install = {
+                "running": False,
+                "ok": ok,
+                "message": "Browser installed." if ok else f"Install failed: {last}",
+            }
+
+        threading.Thread(target=work, name="browser-install", daemon=True).start()
+        return self.browser_status()
+
+    # ------------------------------------------------------- diagnostics
+    def open_logs_folder(self):
+        os.makedirs(LOG_DIR, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(LOG_DIR)  # noqa: S606 - opens Explorer on our own folder
+        else:
+            subprocess.Popen(["xdg-open", LOG_DIR])
+        return LOG_DIR
 
     # --------------------------------------------------------------- runs
-    def _begin(self, method, headless, options, target_name, student_id, password, message):
+    def _begin(self, method, headless, options, target_name, student_id, password, message, kind="run"):
         with self._lock:
             if self._thread and self._thread.is_alive():
                 if self._board.snapshot()["running"]:
@@ -111,6 +213,8 @@ class DesktopApi:
                 phase="login",
                 message=message,
                 total=len(self._plans[0]["courses"]),
+                kind=kind,
+                started_at=time.time(),
             )
             self._runner = PlanRunner(
                 plans=[{"name": plan["name"], "courses": list(plan["courses"])} for plan in self._plans],
@@ -135,7 +239,8 @@ class DesktopApi:
 
     def preflight(self, student_id, password, method="BeautifulSoup", headless=False):
         """Check credentials, course codes, groups, availability and clashes without bidding."""
-        return self._begin(method, headless, None, "preflight", student_id, password, "Preparing pre-flight check...")
+        return self._begin(method, headless, None, "preflight", student_id, password,
+                           "Preparing pre-flight check...", kind="preflight")
 
     def choose(self, codes):
         """Answer a fallback prompt with the course codes to bid."""
@@ -172,6 +277,7 @@ class DesktopApi:
             message="Stopped. A request to the portal did not respond and was abandoned.",
             proposal=None,
             next_retry_at=None,
+            stopping=False,
         )
         with self._lock:
             if self._thread is thread:
@@ -190,7 +296,12 @@ class DesktopApi:
 
 
 def run():
+    from .utils.process_guard import kill_children_on_exit
+
+    kill_children_on_exit()
+    browser_setup.configure_browsers_path()
     api = DesktopApi()
+    atexit.register(api.cleanup)
     index_path = _frontend_index_path()
     if not os.path.exists(index_path):
         raise FileNotFoundError("Vue frontend is not built. Run npm install and npm run build in web/.")

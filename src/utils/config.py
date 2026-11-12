@@ -67,13 +67,14 @@ def create_default_config() -> configparser.ConfigParser:
     
     base_url = 'https://unitreg.utar.edu.my/portal/courseRegStu'
     # Default URLs
+    # Same values as config.ini (interpolated, so UTAR_BASE_URL overrides all of them).
     config['URLs'] = {
-        'base_url': f'{base_url}/',
-        'login_url': f'{base_url}/login.jsp',
-        'login_process_url': f'{base_url}/login_proc.jsp',
-        'registration_url': f'{base_url}/registration/registerUnitSurvey.jsp',
-        'home_url': f'{base_url}/mainpage.jsp',
-        'course_registration_url': f'{base_url}/registration/registerCourse.jsp'
+        'base_url': base_url,
+        'login_url': '%(base_url)s/login.jsp',
+        'login_process_url': '%(base_url)s/loginProSurvey.jsp',
+        'registration_url': '%(base_url)s/registration/registerUnitSurvey.jsp',
+        'home_url': '%(base_url)s/schedule/masterScheduleSurvey.jsp',
+        'course_registration_url': '%(base_url)s/registration/studentRegistrationSurvey.jsp'
     }
     
     # Default Headers
@@ -101,7 +102,8 @@ def create_default_config() -> configparser.ConfigParser:
       # Default Logging Settings
     config['Logging'] = {
         'level': 'INFO',
-        'format': '%%(asctime)s - %%(name)s - %%(levelname)s - %%(message)s'
+        'format': '%%(asctime)s - %%(name)s - %%(levelname)s - %%(message)s',
+        'debug_dumps': 'false'
     }
 
     config['Storage'] = {
@@ -146,8 +148,14 @@ WINDOW_POSITION = (
 )
 
 # Logging
-LOG_LEVEL = config['Logging']['level']
+# UTAR_LOG_LEVEL (DEBUG/INFO/WARNING/ERROR) overrides config.ini for one session.
+LOG_LEVEL = (os.getenv("UTAR_LOG_LEVEL") or config['Logging'].get('level', 'INFO')).upper()
+if LOG_LEVEL not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+    LOG_LEVEL = "INFO"
 LOG_FORMAT = config['Logging']['format']
+# Save HTTP request/response summaries and Playwright screenshots to logs/debug
+# (sanitised: no passwords, cookies or tokens). Off by default.
+DEBUG_DUMPS = (os.getenv("UTAR_DEBUG_DUMPS") or config['Logging'].get('debug_dumps', 'false')).strip().lower() in ("1", "true", "yes", "on")
 
 # Determine the base directory for logs
 if getattr(sys, 'frozen', False):
@@ -159,6 +167,7 @@ else:
 
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'scraper.log')
+DEBUG_DIR = os.path.join(LOG_DIR, 'debug')
 ERROR_LOG_FILE = os.path.join(LOG_DIR, 'error.log')
 
 # Storage
