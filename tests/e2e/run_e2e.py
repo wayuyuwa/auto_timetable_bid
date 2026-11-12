@@ -143,7 +143,8 @@ class Harness:
         self.page.expose_function("__desktopCall", self._bridge)
         self.page.add_init_script(BRIDGE_SCRIPT)
         self.page.goto(self.app_url)
-        self.page.get_by_text("Desktop ready").wait_for(timeout=10_000)
+        self.page.locator("[data-bridge=ready]").wait_for(timeout=10_000)
+        self.page.locator(".notice", has_text="course(s) ready").wait_for(timeout=10_000)
         return self.page
 
     def close_app(self):
@@ -163,6 +164,24 @@ class Harness:
         return getattr(self.api, method)(*args)
 
     # --- UI helpers
+    def tab(self, name):
+        """Open a section tab (Courses, Login & settings, Pre-flight, Registration, Logs)."""
+        self.page.locator("nav.tabs").get_by_role("tab", name=name).click()
+
+    def import_file(self, path, mode=None, new_name=None):
+        """Pick a file and finish the import dialog (mode: None = dialog default)."""
+        self.tab("Courses")
+        self.page.locator("input[type=file]").set_input_files(path)
+        dialog = self.page.locator(".modal-dialog", has_text="IMPORT TIMETABLE")
+        dialog.wait_for()
+        if mode == "new":
+            dialog.get_by_text("Import as new plan", exact=True).click()
+            if new_name:
+                dialog.get_by_label("New plan name").fill(new_name)
+        elif mode == "replace":
+            dialog.locator("input[value=replace]").check()
+        dialog.locator("button[type=submit]").click()
+
     def notice(self):
         return self.page.locator(".notice").inner_text().strip()
 
@@ -170,6 +189,8 @@ class Harness:
         self.page.locator(".notice", has_text=text).wait_for(timeout=timeout)
 
     def row(self, code):
+        if not self.page.locator("nav.tabs [aria-selected=true]", has_text="Courses").count():
+            self.tab("Courses")
         return self.page.locator("tbody tr", has_text=code)
 
     def fill_course_dialog(self, code="", name="", lecture="", tutorial="", practical=""):
@@ -181,10 +202,12 @@ class Harness:
         page.get_by_label("Practical slots").fill(practical)
 
     def fill_credentials(self, student_id="2103370", password="mock-password"):
+        self.tab("Login & settings")
         self.page.get_by_label("Student ID").fill(student_id)
-        self.page.get_by_label("Password").fill(password)
+        self.page.get_by_label("Password", exact=True).fill(password)
 
     def choose_method(self, method):
+        self.tab("Login & settings")
         self.page.get_by_label("Connection method").select_option(method)
         if method == "Playwright":
             self.page.get_by_label("Browser visible").set_checked(self.show_app_browser, force=True)
@@ -326,7 +349,7 @@ def _(h, shot):
 @case("ui_10_import_txt", "Import timetable .txt", "2 courses parsed with slot preferences")
 def _(h, shot):
     h.open_app(courses=[])
-    h.page.locator("input[type=file]").set_input_files(os.path.join(FIXTURES, "timetable.txt"))
+    h.import_file(os.path.join(FIXTURES, "timetable.txt"))
     h.wait_notice("Loaded 2 course(s) from timetable.txt.")
     shot()
     check(h.row("UCCD1004").is_visible() and h.row("UCCD1024").is_visible(), "imported rows missing")
@@ -336,7 +359,7 @@ def _(h, shot):
 @case("ui_11_import_json", "Import courses .json", "3 courses loaded")
 def _(h, shot):
     h.open_app(courses=[])
-    h.page.locator("input[type=file]").set_input_files(os.path.join(FIXTURES, "courses.json"))
+    h.import_file(os.path.join(FIXTURES, "courses.json"))
     h.wait_notice("Loaded 3 course(s) from courses.json.")
     shot()
     check(h.page.locator("tbody tr").count() == 3, "expected 3 rows")
@@ -345,7 +368,7 @@ def _(h, shot):
 @case("ui_12_persistence", "Courses persist across restarts (SQLite)", "Reopened app shows saved courses")
 def _(h, shot):
     h.open_app(courses=[], db_name="persist.db")
-    h.page.locator("input[type=file]").set_input_files(os.path.join(FIXTURES, "courses.json"))
+    h.import_file(os.path.join(FIXTURES, "courses.json"))
     h.wait_notice("Loaded 3 course(s)")
     h.open_app(db_name="persist.db")  # new DesktopApi + new page on the same database
     h.wait_notice("3 course(s) ready.")
@@ -382,6 +405,7 @@ def _(h, shot):
     check(toggle.is_checked(), "toggle should default to ticked (browser visible)")
     toggle.set_checked(False, force=True)
     h.page.get_by_role("button", name="Start registration").click()
+    h.tab("Login & settings")  # Start opens the Registration tab
     toggle.set_checked(True, force=True)
     h.page.get_by_role("button", name="Start registration").click()
     h.page.wait_for_timeout(300)
@@ -471,7 +495,8 @@ def _(h, shot):
     h.mock.slot_times[("MOCK1002", "L", 2)] = ("Tue", 10, 2)
     _start(h)
     status = h.wait_run_finished()
-    h.page.get_by_role("tab", name="Plan B").click()
+    h.tab("Courses")
+    h.page.locator(".plan-tabs").get_by_role("tab", name="Plan B").click()
     shot()
     result = status["results"]["MOCK1002"]
     check(status["phase"] == "error" and result["label"] == "Skipped", f"status {status['phase']} {result}")
@@ -547,7 +572,7 @@ def _(h, shot):
 def _(h, shot):
     h.open_app(courses=[COURSE_A])
     h.fill_credentials()
-    h.page.get_by_label("Start at a set time").set_checked(True, force=True)
+    h.page.get_by_label("When should bidding start?").select_option("at")
     start = time.localtime(time.time() + 8)
     h.page.get_by_label("Bidding opens at").fill(time.strftime("%H:%M:%S", start))
     h.page.get_by_role("button", name="Start registration").click()
@@ -591,12 +616,17 @@ def _(h, shot):
     h.page.get_by_role("button", name="Start registration").wait_for()
 
 
-@case("closed_02_stop_while_login_fails", "Stop safely while login keeps failing",
-      "Stop ends the run within seconds; the app is usable again")
+@case("closed_02_stop_while_login_fails", "Scheduled start while the portal is closed, then Stop",
+      "Login keeps retrying (nothing bid); Stop ends the run within seconds; the app is usable again")
 def _(h, shot):
     h.open_app(courses=[COURSE_A], scenario="closed")
-    _start(h)
-    h.page.wait_for_timeout(1500)
+    h.fill_credentials()
+    h.page.get_by_label("When should bidding start?").select_option("at")
+    h.page.get_by_label("Bidding opens at").fill(time.strftime("%H:%M:%S", time.localtime(time.time() + 20)))
+    h.page.get_by_role("button", name="Start registration").click()
+    h.page.locator(".current-message", has_text="Trying again in").wait_for(timeout=30_000)
+    check(h.api.get_status()["running"], "scheduled run should keep retrying the login")
+    check(h.mock.registered == {}, "something was bid while the portal was closed")
     h.page.get_by_role("button", name="Stop safely").click()
     stopped = time.time()
     status = h.wait_run_finished(timeout=30)
@@ -604,6 +634,263 @@ def _(h, shot):
     check(status["phase"] == "cancelled", f"phase {status['phase']!r}: {status['message']!r}")
     check(time.time() - stopped < 15, "Stop took too long")
     h.page.get_by_role("button", name="Start registration").wait_for()
+
+
+# ---------------------------------------------------------------- issues.txt cases
+
+DROP_SCRIPT = """
+async ([name, content, selector]) => {
+  const file = new File([content], name, { type: "text/plain" });
+  const data = new DataTransfer();
+  data.items.add(file);
+  const target = document.querySelector(selector);
+  for (const type of ["dragenter", "dragover"]) {
+    target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: data }));
+  }
+  const overlay = Boolean(document.querySelector(".drop-overlay"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const overlayShown = overlay || Boolean(document.querySelector(".drop-overlay"));
+  target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: data }));
+  return overlayShown;
+}
+"""
+
+
+@case("ux_01_header_and_tabs", "Short header, no 'Desktop ready', section tabs",
+      "Header is one short title; run status chip instead of the bridge pill; five tabs")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    shot()
+    check(h.page.locator("h1").inner_text().strip() == "UTAR Course Bidding", "header text")
+    check(h.page.get_by_text("Desktop ready").count() == 0, "'Desktop ready' still shown")
+    check(h.page.get_by_text("Choose your courses with confidence").count() == 0, "old long header still shown")
+    tabs = [t.strip() for t in h.page.locator("nav.tabs [role=tab]").all_inner_texts()]
+    check(tabs == ["Courses", "Login & settings", "Pre-flight", "Registration", "Logs"], f"tabs {tabs}")
+    check(h.page.locator(".run-chip").inner_text().strip().startswith("Ready"), "status chip")
+
+
+@case("ux_02_password_toggle", "Password show/hide toggle",
+      "Toggles type each time, keeps the value, works after a validation error")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    h.tab("Login & settings")
+    field = h.page.get_by_label("Password", exact=True)
+    field.fill("Secret-123")
+    reveal = h.page.locator(".reveal-button")
+    for expected in ("text", "password", "text", "password"):
+        reveal.click()
+        check(field.get_attribute("type") == expected, f"type should be {expected}")
+        check(field.input_value() == "Secret-123", "toggle changed the password")
+    h.page.get_by_role("button", name="Start registration").click()  # no student ID -> validation error
+    h.wait_notice("Enter your student ID and password first.")
+    reveal.click()
+    check(field.get_attribute("type") == "text" and field.input_value() == "Secret-123", "toggle broken after validation error")
+    shot()
+    reveal.click()
+    check(field.get_attribute("type") == "password", "did not hide again")
+
+
+@case("ux_03_drag_drop_import", "Drag and drop a timetable file",
+      "Drop area highlights; dropped .txt opens the import dialog; unsupported type is rejected")
+def _(h, shot):
+    h.open_app(courses=[])
+    content = open(os.path.join(FIXTURES, "timetable.txt"), encoding="utf-8").read()
+    overlay = h.page.evaluate(DROP_SCRIPT, ["timetable.txt", content, ".course-panel"])
+    check(overlay, "drop area did not highlight while dragging")
+    dialog = h.page.locator(".modal-dialog", has_text="IMPORT TIMETABLE")
+    dialog.wait_for()
+    shot("_1_dialog")
+    dialog.locator("button[type=submit]").click()
+    h.wait_notice("Loaded 2 course(s) from timetable.txt.")
+    check(h.row("UCCD1004").is_visible(), "dropped file not imported")
+    h.page.evaluate(DROP_SCRIPT, ["notes.pdf", "x", ".course-panel"])
+    h.wait_notice("notes.pdf is not supported")
+    shot("_2_rejected")
+
+
+@case("ux_04_import_mode", "Import as a new plan or replace", "New plan keeps Plan A; replace overwrites only the current plan")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    h.tab("Courses")
+    h.page.locator("input[type=file]").set_input_files(os.path.join(FIXTURES, "courses.json"))
+    dialog = h.page.locator(".modal-dialog", has_text="IMPORT TIMETABLE")
+    dialog.wait_for()
+    check(dialog.locator("input[value=new]").is_checked(), "a non-empty plan must default to 'new plan'")
+    check("cannot be restored" in dialog.inner_text(), "replace consequence not explained")
+    shot("_1_dialog")
+    dialog.get_by_label("New plan name").fill("Imported plan")
+    dialog.locator("button[type=submit]").click()
+    h.wait_notice("into new plan Imported plan")
+    saved = h.api.get_plans()
+    check([p["name"] for p in saved] == ["Plan A", "Imported plan"], f"plans {[p['name'] for p in saved]}")
+    check([c["code"] for c in saved[0]["courses"]] == [MOCK_COURSE["code"]], "Plan A was changed")
+    h.import_file(os.path.join(FIXTURES, "timetable.txt"), mode="replace")
+    h.wait_notice("Loaded 2 course(s) from timetable.txt.")
+    shot("_2_replaced")
+    saved = h.api.get_plans()
+    check(len(saved[1]["courses"]) == 2 and saved[0]["courses"][0]["code"] == MOCK_COURSE["code"], "replace hit the wrong plan")
+
+
+@case("ux_05_toast_queue", "Toast notifications queue", "One toast at a time, next shows after dismiss, no duplicates")
+def _(h, shot):
+    h.open_app(courses=[])
+    h.page.get_by_role("button", name="Start registration").click()  # toast A
+    h.page.get_by_role("button", name="Start registration").click()  # duplicate of A: ignored
+    h.tab("Courses")
+    h.page.get_by_role("button", name="Add course").click()
+    h.page.get_by_role("button", name="Save course").click()  # toast B, queued
+    h.page.get_by_role("button", name="Cancel").click()
+    check(h.page.locator(".toast").count() == 1, "toasts overlap")
+    check("student ID" in h.page.locator(".toast").inner_text(), "first toast should be shown first")
+    shot()
+    h.page.locator(".toast", has_text="student ID").get_by_role("button", name="Dismiss notification").click()
+    second = h.page.locator(".toast", has_text="Course code and course name are required")
+    second.wait_for(timeout=3_000)
+    check(h.page.locator(".toast").count() == 1, "toasts overlap while switching")
+    second.get_by_role("button", name="Dismiss notification").click()
+    h.page.wait_for_timeout(400)
+    check(h.page.locator(".toast").count() == 0, "duplicate toast was queued")
+    h.page.get_by_role("button", name="Start registration").click()
+    h.page.locator(".toast").wait_for()
+    h.page.wait_for_timeout(7_000)
+    check(h.page.locator(".toast").count() == 0, "toast did not dismiss itself")
+
+
+@case("ux_06_narrow_window", "Narrow window (600 px)", "Every tab fits without sideways scrolling; actions stay reachable")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A, COURSE_B])
+    h.page.set_viewport_size({"width": 600, "height": 900})
+    for name in ("Courses", "Login & settings", "Pre-flight", "Registration", "Logs"):
+        h.tab(name)
+        h.page.wait_for_timeout(100)
+        overflow = h.page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
+        check(overflow <= 1, f"{name}: page scrolls sideways by {overflow}px")
+        shot(f"_{name.split()[0].lower()}")
+    check(h.page.get_by_role("button", name="Start registration").is_visible(), "Start not reachable")
+
+
+@case("pf_02_no_plan", "Pre-flight without a course plan", "Login is checked; plan checks are skipped with a reason")
+def _(h, shot):
+    h.open_app(courses=[])
+    h.fill_credentials()
+    h.page.get_by_role("button", name="Run pre-flight check").click()
+    status = h.wait_run_finished()
+    h.page.locator(".step", has_text="Check course codes").wait_for()
+    shot()
+    check(status["phase"] == "preflight_done", f"phase {status['phase']!r}: {status['message']!r}")
+    states = {step["id"]: step["state"] for step in status["steps"]}
+    check(states == {"login": "ok", "registered": "ok", "plans": "skipped", "clashes": "skipped"}, f"steps {states}")
+    check("No course plan yet" in h.page.locator(".step", has_text="Check course codes").inner_text(), "skip reason missing")
+
+
+@case("pf_03_steps_visible", "Pre-flight shows each step while it runs", "A running step and the login attempt are shown")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    h.fill_credentials()
+    h.page.get_by_role("button", name="Run pre-flight check").click()
+    h.page.locator(".step.running, .step.ok").first.wait_for(timeout=10_000)
+    status = h.wait_run_finished()
+    shot()
+    check([step["state"] for step in status["steps"]] == ["ok", "ok", "ok", "ok"], f"steps {status['steps']}")
+    check(all(step["started_at"] and step["ended_at"] for step in status["steps"]), "step timings missing")
+
+
+@case("run_01_stopping_and_timer", "Stop shows Stopping..., elapsed timer runs",
+      "Chip shows elapsed time; after Stop it reads Stopping... until the run has really ended, then Cancelled")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE], scenario="timeout")
+    _start(h)
+    h.wait_phase("bidding")
+    h.page.locator(".run-chip-time").wait_for(timeout=10_000)
+    first = h.page.locator(".run-chip-time").inner_text()
+    h.page.wait_for_timeout(1_200)
+    check(h.page.locator(".run-chip-time").inner_text() != first, "timer is not counting")
+    h.page.get_by_role("button", name="Stop safely").click()
+    h.page.locator(".run-chip", has_text="Stopping...").wait_for(timeout=2_000)
+    check(h.api.get_status()["running"], "run already over; Stopping was not observable")
+    shot("_1_stopping")
+    status = h.wait_run_finished()
+    shot("_2_cancelled")
+    check(status["phase"] == "cancelled" and not status["stopping"], f"status {status['phase']} stopping={status['stopping']}")
+    check(h.page.locator(".run-chip").inner_text().startswith("Cancelled"), "chip did not end as Cancelled")
+    frozen = h.page.locator(".run-chip-time").inner_text()
+    h.page.wait_for_timeout(1_200)
+    check(h.page.locator(".run-chip-time").inner_text() == frozen, "timer kept running after the run ended")
+
+
+@case("login_01_error_panel", "Rejected login shows in the login section and blocks Start",
+      "Error stays visible in Login & settings; Start is blocked until the credentials change")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE])
+    h.fill_credentials(student_id="invalid")
+    h.page.get_by_role("button", name="Start registration").click()
+    status = h.wait_run_finished()
+    check(status["error_source"] == "login" and status["error_kind"] == "invalid_credentials", f"status {status}")
+    panel = h.page.locator(".login-error")
+    panel.wait_for()
+    check(h.page.locator("nav.tabs [aria-selected=true]").inner_text().startswith("Login"), "did not open the Login tab")
+    shot("_1_error")
+    calls_before = len([c for c in h.calls if c[0] == "start"])
+    h.page.get_by_role("button", name="Start registration").click()
+    h.wait_notice("UTAR rejected this student ID or password")
+    check(len([c for c in h.calls if c[0] == "start"]) == calls_before, "Start was not blocked")
+    check(panel.is_visible(), "error disappeared")
+    h.page.get_by_label("Student ID").fill("2103370")
+    h.page.wait_for_timeout(200)
+    check(h.page.locator(".login-error").count() == 0, "error should clear after editing the credentials")
+    shot("_2_cleared")
+
+
+@case("login_02_remember_credentials", "Remember the login (encrypted)", "Reopened app is prefilled; untick forgets it")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE], db_name="cred.db")
+    h.fill_credentials(student_id="2103370", password="Pw-remember-1")
+    h.page.wait_for_timeout(900)
+    import sqlite3
+    rows = dict(sqlite3.connect(h.db_path).execute("SELECT key, value FROM app_settings").fetchall())
+    check("Pw-remember-1" not in str(rows), "password stored in plain text")
+    check(rows.get("password_protected", "").startswith("dpapi:"), f"password not encrypted: {list(rows)}")
+    h.open_app(db_name="cred.db")
+    h.tab("Login & settings")
+    h.page.wait_for_timeout(300)
+    check(h.page.get_by_label("Student ID").input_value() == "2103370", "student ID not remembered")
+    check(h.page.get_by_label("Password", exact=True).input_value() == "Pw-remember-1", "password not remembered")
+    shot()
+    h.page.get_by_label("Remember on this computer").set_checked(False, force=True)
+    h.page.wait_for_timeout(900)
+    h.open_app(db_name="cred.db")
+    h.tab("Login & settings")
+    h.page.wait_for_timeout(300)
+    check(h.page.get_by_label("Password", exact=True).input_value() == "", "password kept after untick")
+
+
+@case("schedule_02_after_delay", "Start after a delay", "Countdown shown; bids only after the delay")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    h.fill_credentials()
+    h.page.get_by_label("When should bidding start?").select_option("after")
+    h.page.get_by_label("Start after (minutes)").fill("0.15")
+    clicked = time.time()
+    h.page.get_by_role("button", name="Start registration").click()
+    h.page.locator(".run-chip", has_text="starts in").wait_for(timeout=8_000)
+    shot("_1_countdown")
+    check("MOCK1001" not in h.mock.registered, "bid before the delay")
+    status = h.wait_run_finished()
+    check(status["phase"] == "complete", f"phase {status['phase']!r}")
+    check(time.time() - clicked >= 9, "finished before the delay")
+
+
+@case("logs_01_activity_log", "Logs tab", "Run steps are listed with times")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    _start(h)
+    h.wait_run_finished()
+    h.tab("Logs")
+    h.page.locator(".activity-log li").first.wait_for()
+    shot()
+    text = h.page.locator(".activity-log").inner_text()
+    check("Logging in" in text and "All courses registered" in text, f"log {text[:300]}")
+
 
 
 def _run_case(method, scenario, student_id, expect_phase, expect_text=None, expect_row=None):
