@@ -138,7 +138,8 @@ class Harness:
             self.api.save_courses(courses)
         if plans is not None:
             self.api.save_plans(plans)
-        self.page = self.browser.new_page(viewport={"width": 1280, "height": 900})
+        self.page = self.browser.new_page(
+            viewport={"width": int(os.environ.get("E2E_WIDTH", "1280")), "height": 900})
         self.page.expose_function("__desktopCall", self._bridge)
         self.page.add_init_script(BRIDGE_SCRIPT)
         self.page.goto(self.app_url)
@@ -576,6 +577,33 @@ def _(h, shot):
     check(status["phase"] == "preflight_done", f"phase {status['phase']!r}")
     check(status["preflight"]["problems"] == 2, f"problems {status['preflight']}")
     check(h.mock.registered == {}, "pre-flight registered something")
+
+
+@case("closed_01_registration_closed", "Portal closed: session expires right after login",
+      "Run ends with a clear login error instead of hanging")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A], scenario="closed")
+    _start(h)
+    status = h.wait_run_finished(timeout=60)
+    shot()
+    check(status["phase"] == "error", f"phase {status['phase']!r}")
+    check("registration may be closed" in status["message"], f"message {status['message']!r}")
+    h.page.get_by_role("button", name="Start registration").wait_for()
+
+
+@case("closed_02_stop_while_login_fails", "Stop safely while login keeps failing",
+      "Stop ends the run within seconds; the app is usable again")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A], scenario="closed")
+    _start(h)
+    h.page.wait_for_timeout(1500)
+    h.page.get_by_role("button", name="Stop safely").click()
+    stopped = time.time()
+    status = h.wait_run_finished(timeout=30)
+    shot()
+    check(status["phase"] == "cancelled", f"phase {status['phase']!r}: {status['message']!r}")
+    check(time.time() - stopped < 15, "Stop took too long")
+    h.page.get_by_role("button", name="Start registration").wait_for()
 
 
 def _run_case(method, scenario, student_id, expect_phase, expect_text=None, expect_row=None):

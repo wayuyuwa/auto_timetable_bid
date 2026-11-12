@@ -314,5 +314,77 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(sessions_clash(lecture["sessions"], lecture["sessions"]))
 
 
+
+class RegistrationClosedTests(RunnerCase):
+    """Portal accepts the login, then answers 'session expired' to everything
+    (what the real portal does when registration is closed). This used to
+    deadlock in the scraper's relogin, freezing pre-flight and Stop."""
+
+    def setUp(self):
+        super().setUp()
+        SERVER.scenario = "closed"
+
+    def test_run_ends_with_login_error_instead_of_hanging(self):
+        started = time.time()
+        runner, thread = self.start_in_thread([plan("Plan A", course("MOCK1001", L=[1]))])
+        thread.join(timeout=60)
+        self.assertFalse(thread.is_alive(), "run hung when the portal kept expiring the session")
+        status = runner.board.snapshot()
+        self.assertEqual(status["phase"], "error")
+        self.assertIn("Login", status["message"])
+        self.assertIn("registration may be closed", status["message"])
+        self.assertLess(time.time() - started, 45)
+
+    def test_preflight_ends_instead_of_hanging(self):
+        runner = PlanRunner([plan("Plan A", course("MOCK1001", L=[1]))], board=StatusBoard())
+        thread = threading.Thread(target=runner.preflight, args=("2103370", "pw"), daemon=True)
+        thread.start()
+        thread.join(timeout=60)
+        self.assertFalse(thread.is_alive(), "pre-flight hung")
+        self.assertEqual(runner.board.snapshot()["phase"], "error")
+
+    def test_stop_works_while_login_keeps_failing(self):
+        runner, thread = self.start_in_thread([plan("Plan A", course("MOCK1001", L=[1]))])
+        time.sleep(1.5)
+        stopped_at = time.time()
+        runner.cancel()
+        thread.join(timeout=30)
+        self.assertFalse(thread.is_alive(), "Stop did not end the run")
+        self.assertEqual(runner.board.snapshot()["phase"], "cancelled")
+        self.assertLess(time.time() - stopped_at, 15)
+
+
+class StopSafetyNetTests(RunnerCase):
+    def test_stop_releases_the_app_even_if_the_worker_never_returns(self):
+        import tempfile
+        from unittest import mock
+
+        from src.storage.database import Database
+        from src.web_backend import DesktopApi
+
+        api = DesktopApi(database=Database(os.path.join(tempfile.mkdtemp(), "app.db")))
+        api.STOP_GRACE_SECONDS = 1
+        api.save_courses([{"code": "MOCK1001", "name": "X", "slots": {"L": [1]}}])
+        release = threading.Event()
+        with mock.patch.object(PlanRunner, "run", lambda self, student_id, password: release.wait(60)):
+            api.start("2103370", "pw")
+            self.assertTrue(api.get_status()["running"])
+            api.cancel()
+            deadline = time.time() + 10
+            while api.get_status()["running"] and time.time() < deadline:
+                time.sleep(0.05)
+            status = api.get_status()
+            self.assertFalse(status["running"], "Stop left the app stuck")
+            self.assertEqual(status["phase"], "cancelled")
+        # A new run can start although the old worker is still blocked.
+        SERVER.scenario = "success"
+        api.start("2103370", "pw")
+        deadline = time.time() + 20
+        while api.get_status()["running"] and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(api.get_status()["phase"], "complete")
+        release.set()
+        api.cleanup()
+
 if __name__ == "__main__":
     unittest.main()

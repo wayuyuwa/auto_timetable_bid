@@ -142,3 +142,19 @@ h3 { margin: 0 0 10px; font-family: Georgia, serif; font-size: 17px; font-weight
 .proposal-reason { grid-column: 1 / -1; color: var(--muted); font-size: 12px; line-height: 1.4; }
 @media (max-width: 850px) { .plan-tools { margin-left: 0; } }
 .outcome-cell .row-status { text-align: left; }
+
+/* Course table fits its panel at any window width: no sideways scrolling. */
+.management-table { table-layout: fixed; min-width: 0; }
+.management-table th:nth-child(1) { width: 104px; }
+.management-table th:nth-child(3) { width: 19%; }
+.management-table th:nth-child(4) { width: 25%; }
+.management-table th:nth-child(5) { width: 136px; }
+.management-table .course-name, .management-table .course-slots { max-width: none; overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.outcome-cell { min-width: 0; }
+.outcome-detail { max-width: none; overflow-wrap: anywhere; }
+.management-table th:nth-child(1) { width: 98px; }
+.management-table th:nth-child(3) { width: 15%; }
+.management-table th:nth-child(4) { width: 24%; }
+.management-table th:nth-child(5) { width: 128px; }
+.management-table td, .management-table th { padding-left: 10px; padding-right: 8px; }
+.outcome-cell .row-status { justify-self: start; }

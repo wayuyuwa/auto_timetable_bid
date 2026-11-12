@@ -8,6 +8,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+SESSION_EXPIRED_PAGE = "<script>window.parent.location.href='sessionExpired.jsp'</script>"
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 SLOT_TYPES = ("L", "T", "P")
 CLASH_MESSAGE = (
@@ -127,7 +128,12 @@ class MockHandler(BaseHTTPRequestHandler):
             with open(CAPTCHA_IMAGE, "rb") as image:
                 self._send(image.read(), content_type="image/jpeg")
         elif path == f"{base}/registration/studentRegistrationSurvey.jsp":
-            self._send(self._home_page(base, unit_lookup=True))
+            if self.mock_server.scenario == "closed":
+                # Registration closed: login is accepted, then every page answers
+                # "session expired" (what the real portal does outside the window).
+                self._send(SESSION_EXPIRED_PAGE)
+            else:
+                self._send(self._home_page(base, unit_lookup=True))
         elif path == f"{base}/registration/registerCourse.jsp":
             self._send(self._home_page(base, register=True))
         else:
@@ -300,7 +306,7 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--scenario",
-        choices=("success", "register-fail", "timeout", "session-expired"),
+        choices=("success", "register-fail", "timeout", "session-expired", "closed"),
         default="success",
     )
     parser.add_argument("--delay", type=float, default=15, help="Timeout scenario delay in seconds")

@@ -9,7 +9,7 @@ import urllib3
 import socket
 import os
 from time import sleep
-from threading import Event, Lock
+from threading import Event, Lock, RLock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from ..utils.config import (
@@ -49,35 +49,11 @@ class BeautifulSoupScraper:
             pool_connections (int): Number of connection pools
             pool_maxsize (int): Maximum connections per pool
         """
-        # Configure session with retry strategy
-        self.session = requests.Session()
-        
-        # Configure retry strategy.
-        # read=0: do NOT retry read timeouts at the adapter level. A hanging
-        # request otherwise blocks ~connection_retries x connection_timeout
-        # (~40s) before the service's cancellation check runs, so "Stop safely"
-        # feels unresponsive. Connection-drop retries are kept for resilience,
-        # and register_courses() has its own cancellation-aware retry loop for
-        # transient failures.
-        retry_strategy = Retry(
-            total=connection_retries,
-            connect=connection_retries,
-            read=0,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
-            raise_on_status=False,
-        )
-        
-        # Mount adapter with retry strategy
-        adapter = HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=pool_connections,
-            pool_maxsize=pool_maxsize
-        )
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
-        
+        self._connection_retries = connection_retries
+        self._pool_connections = pool_connections
+        self._pool_maxsize = pool_maxsize
+        self.session = self._new_session()
+
         self.headers = DEFAULT_HEADERS
         self.connection_timeout = connection_timeout
         self.captcha_solver = CaptchaSolver()
@@ -90,9 +66,38 @@ class BeautifulSoupScraper:
         self._student_id = None
         self._password = None
         self._is_logged_in = False
-        self._relogin_lock = Lock()  # Lock to prevent multiple relogin attempts
+        self._relogin_lock = RLock()  # Lock to prevent multiple relogin attempts
+        self._relogin_active = False  # True while a relogin is running
         
         logger.info("BeautifulSoupScraper initialized")
+
+    def _new_session(self):
+        """Build the HTTP session.
+
+        read=0: do NOT retry read timeouts at the adapter level. A hanging
+        request otherwise blocks ~connection_retries x connection_timeout
+        (~40s) before the cancellation check runs, so "Stop safely" feels
+        unresponsive. Connection-drop retries are kept for resilience, and
+        register_courses() has its own cancellation-aware retry loop.
+        """
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=self._connection_retries,
+            connect=self._connection_retries,
+            read=0,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"],
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=self._pool_connections,
+            pool_maxsize=self._pool_maxsize,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
 
     def cancel(self):
         """Set the cancellation token to stop ongoing operations."""
@@ -150,32 +155,27 @@ class BeautifulSoupScraper:
             
         # Prevent multiple simultaneous relogin attempts
         with self._relogin_lock:
+            if self._relogin_active:
+                # login() itself hit "session expired" (for example when
+                # registration is closed). Starting another relogin from inside
+                # a relogin used to deadlock on this lock; give up instead.
+                logger.warning("Session expired again during relogin; not retrying")
+                return False
             if self._is_logged_in:
                 # Another thread already relogged in successfully
                 return True
-                
+
             logger.info("Attempting to relogin due to session expiration")
+            self._relogin_active = True
             try:
+                self._check_cancellation()
                 # Clear the session and create a new one
                 self.session.close()
-                self.session = requests.Session()
-                
-                # Configure retry strategy again
-                retry_strategy = Retry(
-                    total=3,
-                    backoff_factor=0.5,
-                    status_forcelist=[429, 500, 502, 503, 504],
-                    allowed_methods=["GET", "POST"]
-                )
-                
-                # Mount adapter with retry strategy
-                adapter = HTTPAdapter(max_retries=retry_strategy)
-                self.session.mount("http://", adapter)
-                self.session.mount("https://", adapter)
-                
+                self.session = self._new_session()
+
                 # Attempt login with stored credentials
-                login_result = self.login(self._student_id, self._password)
-                
+                login_result = self.login(self._student_id, self._password, max_retries=1)
+
                 if 'success' in login_result:
                     self._is_logged_in = True
                     logger.info("Successfully relogged in after session expiration")
@@ -183,10 +183,12 @@ class BeautifulSoupScraper:
                 else:
                     logger.error("Failed to relogin after session expiration")
                     return False
-                    
+
             except Exception as e:
                 logger.error(f"Error during relogin attempt: {str(e)}")
                 return False
+            finally:
+                self._relogin_active = False
 
     async def fetch_student_info(self, unit_code: str, group_code: str) -> dict:
         """
@@ -515,7 +517,11 @@ class BeautifulSoupScraper:
         
         # If we've exhausted all retries
         self._is_logged_in = False
-        raise Exception(f"Login failed after {max_retries} attempts. Please try again later.")
+        self._check_cancellation()
+        raise Exception(
+            f"Login failed after {max_retries} attempt(s). The portal kept returning its "
+            "session-expired page or did not respond; course registration may be closed right now."
+        )
 
     def get_home_page_data(self) -> tuple:
         """

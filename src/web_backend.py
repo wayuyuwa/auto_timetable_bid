@@ -23,6 +23,8 @@ logger = setup_logger(__name__)
 class DesktopApi:
     """Small local API exposed to Vue through pywebview."""
 
+    STOP_GRACE_SECONDS = 25
+
     def __init__(self, database=None):
         # Courses live in SQLite; the old JSON file is imported once if the table is empty.
         database = database or Database()
@@ -143,10 +145,38 @@ class DesktopApi:
         return self.get_status()
 
     def cancel(self):
-        runner = self._runner
+        runner, thread, board = self._runner, self._thread, self._board
         if runner is not None:
             runner.cancel()
+            if thread is not None and thread.is_alive():
+                watchdog = threading.Thread(
+                    target=self._release_if_stuck, args=(thread, board), daemon=True
+                )
+                watchdog.start()
         return self.get_status()
+
+    def _release_if_stuck(self, thread, board):
+        """Safety net: Stop must never leave the app stuck.
+
+        If the worker has not finished within STOP_GRACE_SECONDS of a stop
+        (for example a network call that never returns), report the run as
+        stopped and let the user start again; the old worker is abandoned.
+        """
+        thread.join(timeout=self.STOP_GRACE_SECONDS)
+        if not thread.is_alive():
+            return
+        logger.error("Worker did not stop within %s s; abandoning it", self.STOP_GRACE_SECONDS)
+        board.update(
+            running=False,
+            phase="cancelled",
+            message="Stopped. A request to the portal did not respond and was abandoned.",
+            proposal=None,
+            next_retry_at=None,
+        )
+        with self._lock:
+            if self._thread is thread:
+                self._thread = None
+                self._runner = None
 
     def get_status(self):
         return self._board.snapshot()
