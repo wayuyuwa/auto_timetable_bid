@@ -39,20 +39,6 @@ def build_executable():
     # Determine separator based on platform
     sep = ";" if platform.system() == "Windows" else ":"
     
-    # Find ddddocr model file path
-    try:
-        import ddddocr
-        ddddocr_path = os.path.dirname(ddddocr.__file__)
-        model_path = os.path.join(ddddocr_path, "common.onnx")
-        if os.path.exists(model_path):
-            print(f"Found ddddocr model at: {model_path}")
-        else:
-            print(f"Warning: ddddocr model file not found at {model_path}")
-            model_path = None
-    except ImportError:
-        print("Warning: ddddocr package not found")
-        model_path = None
-    
     # Define PyInstaller command
     cmd = [
         sys.executable,
@@ -68,27 +54,30 @@ def build_executable():
     if icon_path:
         cmd.append(f"--icon={icon_path}")
     
-    # Add data files
+    # Add data files. Python code is bundled by PyInstaller from the imports;
+    # only files read at runtime are added here (not the whole src/ folder, which
+    # also held the unused legacy PyQt GUI, duplicate sources and caches).
+    ocr_dir = os.path.join("src", "utils", "ocr")
     cmd.extend([
-        f"--add-data=src{sep}src",  # Include source files
+        f"--add-data={os.path.join(ocr_dir, 'common_old.onnx')}{sep}{ocr_dir}",  # captcha OCR model
+        f"--add-data={os.path.join(ocr_dir, 'common_old_charset.json')}{sep}{ocr_dir}",
         f"--add-data=resources{sep}resources",  # Include resources
         f"--add-data={os.path.join('web', 'dist')}{sep}{os.path.join('web', 'dist')}",  # Built Vue frontend only (not node_modules)
     ])
-    
-    # Add ddddocr model file if found
-    if model_path:
-        # Add model file to the same location it would be in the package
-        cmd.append(f"--add-data={model_path}{sep}{os.path.join('ddddocr')}")
-    
+
     # Add hidden imports
     cmd.extend([
         "--hidden-import=requests",
         "--hidden-import=bs4",
         "--hidden-import=playwright",
         "--hidden-import=webview",
-        "--hidden-import=ddddocr",
         # The pywebview app does not use Qt; keep the legacy PyQt5 GUI out of the bundle
         "--exclude-module=PyQt5",
+        "--exclude-module=src.gui",
+        # Not used at runtime (captchas are JPEG; AVIF support alone is ~7.5 MB)
+        "--exclude-module=tkinter",
+        "--exclude-module=PIL.AvifImagePlugin",
+        "--exclude-module=PIL._avif",
     ])
     
     # Add main script
@@ -100,14 +89,15 @@ def build_executable():
     # Run PyInstaller
     try:
         subprocess.check_call(cmd)
+        # The app reads config.ini next to the exe (portal URLs, logging).
+        shutil.copy2(os.path.join(cur_dir, "config.ini"), os.path.join(cur_dir, "dist", "UnitRegTimetable", "config.ini"))
         print("\nBuild successful!")
         print("\nApp folder: dist/UnitRegTimetable (run UnitRegTimetable.exe inside it;")
         print("distribute the whole folder, not only the exe).")
-        print("\nUsage examples:")
+        print("\nUsage:")
         print("  UnitRegTimetable.exe")
-        print("  UnitRegTimetable.exe --timetable-file MyTimetable.txt")
-        print("  UnitRegTimetable.exe --method playwright")
-        print("  UnitRegTimetable.exe --timetable-file MyTimetable.txt --method playwright")
+        print("  UnitRegTimetable.exe --test-real-server --student-id ID --saved   (report: logs/real-server-test.txt)")
+        print("\nSize report: python tools/bundle_size.py")
     except subprocess.CalledProcessError as e:
         print(f"Build failed with error: {e}")
         return False

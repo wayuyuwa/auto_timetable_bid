@@ -34,27 +34,39 @@ An educational project demonstrating web scraping and automation techniques usin
 - **Retry, scheduling and pre-flight**:
   - Starting again retries only the courses that are still missing
   - Optional retry on a timer until a class frees up
-  - Start at a set time: logs in shortly before and bids at the exact second
-  - Pre-flight check: verifies login, course codes, groups, availability and
-    clashes without registering anything
+  - Start immediately, at a set clock time, or after a delay (with a countdown).
+    For a timed start the app logs in a minute early; if the portal still looks
+    closed it keeps retrying only the login (never bidding) until shortly after
+    the start time
+  - Pre-flight check: shows each step live (login, registered list, course
+    checks, clashes) and verifies login, course codes, groups, availability and
+    clashes without registering anything. Works without a course plan, to test
+    the login on its own
 - **Desktop interface**:
-  - Vue frontend shown in a pywebview window
+  - Vue frontend shown in a pywebview window, in tabs (Courses, Login &
+    settings, Pre-flight, Registration, Logs) so it also works in small windows
+  - Run status with elapsed time, login attempt (e.g. 2/5), countdown, and
+    "Stopping..." after Stop until the run has really ended
+  - Drag and drop a timetable file onto the course list; choose to import it as
+    a new plan or replace the current plan
+  - Login problems stay visible in the login section (wrong password, portal
+    closed, portal not responding, browser missing)
   - Courses and plans stored in SQLite (`data/app.db`)
-  - Live progress and per-course outcome
 - **Additional Features**:
-  - Secure credential storage
-  - CAPTCHA solving using ddddocr
-  - Headless mode support
+  - Remembered login: the password is encrypted with your Windows account
+    (DPAPI) and never written to logs
+  - CAPTCHA solving with a bundled ONNX model
+  - Headless mode support; one-click install of the Playwright browser
+  - Browser and helper processes are closed even if the app crashes
 
 ## Requirements
 
 - Python 3.8+
 - Node.js 18+ and npm (to build the Vue frontend)
-- PyQt5
 - pywebview
-- Playwright and Chromium
+- Playwright and Chromium (the app can install Chromium for you)
 - BeautifulSoup4
-- ddddocr
+- onnxruntime, numpy, Pillow (captcha OCR)
 
 ## Installation
 
@@ -127,7 +139,26 @@ venv\Scripts\python tests\e2e\run_e2e.py
 
 # Stress test: repeat + cancel cycles, concurrent load, soak (tests/stress/report.md)
 venv\Scripts\python tests\stress\run_stress.py --quick
+
+# Features from issues.txt (login kinds, scheduling, credentials, browser path, ...)
+venv\Scripts\python -m unittest tests/test_issue_fixes.py
 ```
+
+### Real-server check (no bidding)
+
+Logs in to the real portal, reads your student information and registered
+courses, then stops. It never calls a registration endpoint.
+
+```powershell
+venv\Scripts\python main.py --test-real-server --student-id 2103370 --prompt
+venv\Scripts\python main.py --test-real-server --saved --method playwright
+dist\UnitRegTimetable\UnitRegTimetable.exe --test-real-server --saved
+```
+
+Password sources: `UTAR_PASSWORD`, `--saved` (the login remembered in the app)
+or `--prompt`. Each stage prints OK/FAIL; exit code 0 = passed, 1 = a stage
+failed, 2 = usage problem. The report is also written to
+`logs/real-server-test.txt` (the exe has no console).
 
 ### Known limitation: switching groups
 
@@ -162,29 +193,32 @@ python main.py
 
 The application uses several configuration files:
 
-- `config.ini`: Main configuration file for URLs, timeouts, and other settings
-- `user_settings.json`: User-specific settings (credentials, preferences)
-- `.gitignore`: Configured to exclude sensitive files
+- `config.ini`: URLs, timeouts and logging. Under `[Logging]`, `level` can be
+  DEBUG, INFO, WARNING or ERROR (or set `UTAR_LOG_LEVEL`), and
+  `debug_dumps = true` saves sanitised request/response files and Playwright
+  screenshots to `logs/debug/` for troubleshooting (passwords, cookies and IC
+  numbers are masked)
+- `data/app.db`: plans, courses and the remembered login
+- `logs/`: `scraper.log`, `error.log`, `real-server-test.txt`
+
+Packaged app size: about 221 MB. Most of it is runtime the app needs:
+Playwright's Node.js driver (~96 MB), onnxruntime (~38 MB), numpy's math
+library (~20 MB) and the captcha model (13 MB). Chromium itself is not bundled
+(it would add ~300 MB); it is installed once per user. Run
+`python tools/bundle_size.py` after a build to see the breakdown.
 
 ## Project Structure
 
 ```
+See docs/KNOWLEDGE.md for a full map of every file and where to edit.
+
 src/
-├── gui/
-│   ├── main_window.py      # Main GUI implementation
-│   └── __init__.py
-├── scrapers/
-│   ├── beautifulsoup_scraper.py
-│   ├── playwright_scraper.py
-│   ├── html_parser.py
-│   └── __init__.py
-├── utils/
-│   ├── captcha_solver.py   # CAPTCHA solving utility
-│   ├── config.py          # Configuration loader
-│   ├── settings.py        # Settings manager
-│   ├── timetable_reader.py # Timetable parsing
-│   └── __init__.py
-└── main.py                # Application entry point
+├── web_backend.py          # Desktop API used by the Vue frontend
+├── real_server_test.py     # --test-real-server
+├── services/plan_runner.py # Registration engine
+├── scrapers/               # BeautifulSoup and Playwright scrapers, parsers, errors
+├── storage/database.py     # SQLite
+└── utils/                  # config, logging, OCR, secret store, browser setup, diagnostics
 
 web/
 ├── src/                    # Vue frontend
@@ -193,9 +227,10 @@ web/
 
 ## Security Notes
 
-- Credentials are stored locally in `user_settings.json`
-- This file is excluded from git via `.gitignore`
-- Consider using environment variables for sensitive data in production
+- The remembered password is encrypted with Windows DPAPI (only your Windows
+  account on this computer can decrypt it) and stored in `data/app.db`
+- Untick "Remember on this computer" to delete it
+- Passwords, cookies and session ids are never written to logs or debug files
 
 ## Educational Value
 
