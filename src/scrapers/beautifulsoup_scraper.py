@@ -2,6 +2,7 @@
 BeautifulSoup implementation for scraping UTAR course registration data.
 """
 
+import re
 import requests
 from bs4 import BeautifulSoup
 import urllib3
@@ -18,7 +19,12 @@ from ..utils.config import (
 from ..utils.captcha_solver import CaptchaSolver
 from ..utils.logger import setup_logger
 from ..models.course import Course
-from .html_parser import find_course_value, parse_home_page
+from .html_parser import (
+    find_course_value,
+    parse_home_page,
+    parse_registered_courses,
+    parse_unit_slots,
+)
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -825,6 +831,49 @@ class BeautifulSoupScraper:
             logger.error(f"Error fetching course value: {str(e)}")
             return None
     
+    def get_registered_courses(self) -> dict:
+        """Read the registered-courses page: the source of truth for what is
+        actually registered. Returns {"courses": [...], "info": {...}}."""
+        self._check_cancellation()
+        try:
+            response = self.session.get(
+                COURSE_REGISTRATION_URL,
+                headers=self.headers,
+                verify=False,
+                timeout=self.connection_timeout,
+            )
+            self._check_session_expired(response)
+        except SessionExpiredException:
+            if not self._try_relogin():
+                raise
+            return self.get_registered_courses()
+        html = response.content.decode('utf-8', errors='ignore')
+        return {"courses": parse_registered_courses(html), "info": parse_home_page(html)}
+
+    def get_unit_slots(self, unit_code: str) -> list:
+        """Class slots offered for a unit (timing, availability, selectable)."""
+        self._check_cancellation()
+        data = {
+            'reqPaperType': 'M',
+            'reqFregkey': '',
+            'reqUnit': unit_code,
+            'Save': 'View'
+        }
+        try:
+            response = self.session.post(
+                REGISTRATION_URL,
+                headers=self.headers,
+                data=data,
+                verify=False,
+                timeout=self.connection_timeout,
+            )
+            self._check_session_expired(response)
+        except SessionExpiredException:
+            if not self._try_relogin():
+                raise
+            return self.get_unit_slots(unit_code)
+        return parse_unit_slots(response.content.decode('utf-8', errors='ignore'))
+
     def _submit_bidding(self, unit_code: str, student_id: str, paper_type: str, 
                        req_session: str, req_sid: str, req_with_class: str, req_mids: list) -> dict:
         """
@@ -893,6 +942,13 @@ class BeautifulSoupScraper:
                     'message': "Course registration successful!"
                 }
             
+            alert = re.search(r"alert\(\s*['\"]([^'\"]*failed[^'\"]*)['\"]", response.text, re.I)
+            if alert:
+                return {
+                    'success': False,
+                    'error': alert.group(1).strip()
+                }
+
             # If we can't definitively determine the status
             return {
                 'success': False,

@@ -22,7 +22,7 @@ from ..utils.config import (
     WAIT_TIME_SHORT,
 )
 from ..utils.logger import setup_logger
-from .html_parser import parse_home_page
+from .html_parser import parse_home_page, parse_registered_courses, parse_unit_slots
 
 logger = setup_logger(__name__)
 
@@ -191,6 +191,26 @@ class PlaywrightScraper:
         return parse_home_page(page.content()), self.context.cookies()
 
     @_on_owner_thread
+    def get_registered_courses(self) -> dict:
+        """Read the registered-courses page: the source of truth for what is
+        actually registered. Returns {"courses": [...], "info": {...}}."""
+        page = self._ensure_page()
+        self._goto(COURSE_REGISTRATION_URL)
+        html = page.content()
+        return {"courses": parse_registered_courses(html), "info": parse_home_page(html)}
+
+    @_on_owner_thread
+    def get_unit_slots(self, unit_code: str) -> list:
+        """Class slots offered for a unit (timing, availability, selectable)."""
+        page = self._ensure_page()
+        self._goto(COURSE_REGISTRATION_URL)
+        page.locator("table#tblGrid").wait_for(state="visible")
+        page.locator("input#reqUnit[name=reqUnit]").fill(unit_code)
+        page.locator("input#reqUnit[name=reqUnit]").press("Enter")
+        page.locator("form[name=frmSummary]").wait_for(state="visible")
+        return parse_unit_slots(page.content())
+
+    @_on_owner_thread
     def store_cookies(self, path: str = "cookies.txt"):
         if self.context:
             with open(path, "w", encoding="utf-8") as file:
@@ -240,9 +260,16 @@ class PlaywrightScraper:
         page.once("dialog", handle_dialog)
         page.locator("input[name=Submit]").last.click()
         self._check_cancellation()
-        message = dialog_message[0].lower() if dialog_message else ""
-        if "valid class combination" in message:
+        try:
+            # The portal reports failures in an alert on the result page.
+            page.wait_for_load_state("domcontentloaded", timeout=WAIT_TIME_SHORT * 1000)
+        except PlaywrightTimeoutError:
+            pass
+        message = dialog_message[0] if dialog_message else ""
+        if "valid class combination" in message.lower():
             return "Invalid timetable", False
+        if "failed" in message.lower():
+            return message, False
         return f"Registered {course.code}", True
 
     @_on_owner_thread

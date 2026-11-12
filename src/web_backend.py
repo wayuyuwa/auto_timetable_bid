@@ -11,8 +11,8 @@ from copy import deepcopy
 import webview
 
 from .models.course import Course
-from .services.bidding_service import BiddingService
-from .storage.database import CourseRepository, Database
+from .services.plan_runner import PlanRunner, StatusBoard
+from .storage.database import CourseRepository, Database, PlanRepository
 from .utils.config import BASE_DIR
 from .utils.timetable_reader import TimetableReader
 from .utils.logger import setup_logger
@@ -25,51 +25,57 @@ class DesktopApi:
 
     def __init__(self, database=None):
         # Courses live in SQLite; the old JSON file is imported once if the table is empty.
+        database = database or Database()
         self.courses_file = os.path.join(BASE_DIR, "data", "courses.json")
-        self.course_repo = CourseRepository(database or Database())
+        self.course_repo = CourseRepository(database)
         self.course_repo.migrate_from_json(self.courses_file)
-        self.service = BiddingService()
-        self.service.login_progress.connect(self._on_login_progress)
-        self.service.login_completed.connect(self._on_login_completed)
-        self.service.bid_started.connect(self._on_bid_started)
-        self.service.bid_progress.connect(self._on_bid_progress)
-        self.service.bid_course_completed.connect(self._on_course_completed)
-        self.service.bid_all_completed.connect(self._on_bid_completed)
-        self.service.session_expired.connect(self._on_session_expired)
-        self.service.network_error.connect(self._on_network_error)
-        self.service.operation_cancelled.connect(self._on_cancelled)
+        # Timetable plans (Plan A, B, ...). The legacy single list becomes Plan A.
+        self.plan_repo = PlanRepository(database)
+        self.plan_repo.ensure_initial_plan(self.course_repo)
         self._lock = threading.Lock()
         self._thread = None
-        self._courses = self._load_courses()
-        self._status = self._empty_status()
+        self._runner = None
+        self._board = StatusBoard()
+        self._plans = self._load_plans()
 
-    def _empty_status(self):
-        return {
-            "running": False,
-            "phase": "idle",
-            "message": "Ready",
-            "completed": 0,
-            "total": 0,
-            "results": {},
-        }
-
-    def _load_courses(self):
+    # ------------------------------------------------------------- plans
+    def _load_plans(self):
         try:
-            return self.course_repo.list_courses()
+            plans = self.plan_repo.list_plans()
         except (sqlite3.Error, ValueError, TypeError) as error:
-            logger.error("Failed to load courses: %s", error)
-            return []
+            logger.error("Failed to load plans: %s", error)
+            plans = []
+        return plans or [{"name": PlanRepository.DEFAULT_PLAN_NAME, "courses": []}]
 
+    def _persist(self):
+        self.plan_repo.replace_plans(self._plans)
+
+    def get_plans(self):
+        return [
+            {"name": plan["name"], "courses": [course.__dict__ for course in plan["courses"]]}
+            for plan in self._plans
+        ]
+
+    def save_plans(self, plans):
+        parsed = []
+        for index, plan in enumerate(plans or []):
+            name = str(plan.get("name") or "").strip() or f"Plan {chr(ord('A') + index)}"
+            courses = [Course(**course) for course in plan.get("courses", [])]
+            parsed.append({"name": name, "courses": courses})
+        self._plans = parsed or [{"name": PlanRepository.DEFAULT_PLAN_NAME, "courses": []}]
+        self._persist()
+        return self.get_plans()
+
+    # Plan A shortcuts, kept for callers that manage a single course list.
     def get_courses(self):
-        return [course.__dict__ for course in self._courses]
+        return [course.__dict__ for course in self._plans[0]["courses"]]
 
     def save_courses(self, courses):
-        parsed = [Course(**course) for course in courses]
-        self.course_repo.replace_courses(parsed)
-        self._courses = parsed
+        self._plans[0]["courses"] = [Course(**course) for course in courses]
+        self._persist()
         return self.get_courses()
 
-    def import_courses(self, filename, content):
+    def import_courses(self, filename, content, plan_index=0):
         if filename.lower().endswith(".json"):
             courses = [Course(**course) for course in json.loads(content)]
         else:
@@ -80,87 +86,72 @@ class DesktopApi:
                 courses = TimetableReader.read_timetable(temp_path)
             finally:
                 os.unlink(temp_path)
-        self._courses = courses
-        self.save_courses(self.get_courses())
-        return self.get_courses()
+        plan_index = int(plan_index or 0)
+        if not 0 <= plan_index < len(self._plans):
+            raise ValueError("That plan does not exist")
+        self._plans[plan_index]["courses"] = courses
+        self._persist()
+        return [course.__dict__ for course in courses]
 
-    def start(self, student_id, password, method="BeautifulSoup", headless=False):
+    # --------------------------------------------------------------- runs
+    def _begin(self, method, headless, options, target_name, student_id, password, message):
         with self._lock:
             if self._thread and self._thread.is_alive():
                 raise RuntimeError("A registration run is already in progress")
-            self.service.set_scraper_type(method)
-            self.service.set_headless_mode(bool(headless))
-            self.service.reset_cancellation()
-            self._status = self._empty_status()
-            self._status.update({
-                "running": True,
-                "phase": "login",
-                "message": "Preparing login...",
-                "total": len(self._courses),
-            })
-            self._thread = threading.Thread(target=self.service.login, args=(student_id, password), daemon=True)
+            self._board = StatusBoard()
+            self._board.update(
+                running=True,
+                phase="login",
+                message=message,
+                total=len(self._plans[0]["courses"]),
+            )
+            self._runner = PlanRunner(
+                plans=[{"name": plan["name"], "courses": list(plan["courses"])} for plan in self._plans],
+                method=method,
+                headless=bool(headless),
+                options=options or {},
+                board=self._board,
+            )
+            target = getattr(self._runner, target_name)
+            self._thread = threading.Thread(target=target, args=(student_id, password), daemon=True)
             self._thread.start()
         return self.get_status()
 
+    def start(self, student_id, password, method="BeautifulSoup", headless=False, options=None):
+        """Start a registration run.
+
+        options: fallback_mode ("auto" | "ask"), auto_retry_seconds, max_attempts,
+        start_at (epoch seconds for a scheduled start). Courses that are already
+        registered are skipped, so starting again retries only what is missing.
+        """
+        return self._begin(method, headless, options, "run", student_id, password, "Preparing login...")
+
+    def preflight(self, student_id, password, method="BeautifulSoup", headless=False):
+        """Check credentials, course codes, groups, availability and clashes without bidding."""
+        return self._begin(method, headless, None, "preflight", student_id, password, "Preparing pre-flight check...")
+
+    def choose(self, codes):
+        """Answer a fallback prompt with the course codes to bid."""
+        runner = self._runner
+        if runner is not None:
+            runner.submit_choice(codes)
+        return self.get_status()
+
     def cancel(self):
-        self.service.cancel()
+        runner = self._runner
+        if runner is not None:
+            runner.cancel()
         return self.get_status()
 
     def get_status(self):
-        with self._lock:
-            return deepcopy(self._status)
-
-    def _update(self, **values):
-        with self._lock:
-            self._status.update(values)
-
-    def _on_login_progress(self, message):
-        self._update(phase="login", message=message)
-
-    def _on_login_completed(self, success, message):
-        if not success:
-            self._update(running=False, phase="error", message=message)
-            return
-        self._update(phase="bidding", message="Login successful. Starting course registration...")
-        self.service.bid_courses(self._courses)
-
-    def _on_bid_started(self, total):
-        self._update(phase="bidding", total=total, message=f"Starting registration for {total} course(s)...")
-
-    def _on_bid_progress(self, message, current, total):
-        self._update(phase="bidding", completed=current - 1, total=total, message=message)
-
-    def _on_course_completed(self, result):
-        status = "success" if result.is_successful() else "failed"
-        with self._lock:
-            self._status["results"][result.course_code] = {
-                "status": status,
-                "label": "Success" if status == "success" else "Needs attention",
-                "message": result.message,
-            }
-            self._status["completed"] = len(self._status["results"])
-            self._status["message"] = result.message
-
-    def _on_bid_completed(self, success, results):
-        self._update(
-            running=False,
-            phase="complete" if success else "error",
-            completed=len(results),
-            message="All courses registered successfully." if success else "Registration finished with items needing attention.",
-        )
-
-    def _on_session_expired(self):
-        self._update(running=False, phase="error", message="Your session expired. Please log in again.")
-
-    def _on_network_error(self, message):
-        self._update(running=False, phase="error", message=message)
-
-    def _on_cancelled(self):
-        self._update(running=False, phase="cancelled", message="Registration cancelled safely.")
+        return self._board.snapshot()
 
     def cleanup(self):
-        self.service.cancel()
-        self.service.cleanup()
+        runner, thread = self._runner, self._thread
+        if runner is not None:
+            runner.cancel()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=20)
 
 
 def run():

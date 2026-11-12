@@ -45,6 +45,29 @@ class Database:
                 )
                 """
             )
+            # Timetable plans (Plan A, Plan B, ...): each is a full course list.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS plans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS plan_courses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    plan_id INTEGER NOT NULL,
+                    code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    slots_json TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(plan_id, code)
+                )
+                """
+            )
             conn.commit()
 
 
@@ -152,3 +175,59 @@ class CourseRepository:
             self.replace_courses(courses)
         except Exception:
             return
+
+
+class PlanRepository:
+    """Ordered timetable plans, each holding its own course list."""
+
+    DEFAULT_PLAN_NAME = "Plan A"
+
+    def __init__(self, database: Database):
+        self.database = database
+
+    def list_plans(self) -> List[Dict[str, Any]]:
+        """Return [{"name": str, "courses": [Course, ...]}, ...] in plan order."""
+        with self.database._connect() as conn:
+            plan_rows = conn.execute(
+                "SELECT id, name FROM plans ORDER BY sort_order ASC, id ASC"
+            ).fetchall()
+            plans = []
+            for plan_row in plan_rows:
+                course_rows = conn.execute(
+                    "SELECT code, name, slots_json FROM plan_courses "
+                    "WHERE plan_id = ? ORDER BY sort_order ASC, id ASC",
+                    (plan_row["id"],),
+                ).fetchall()
+                courses = [
+                    Course(code=row["code"], name=row["name"],
+                           slots=json.loads(row["slots_json"]) if row["slots_json"] else {})
+                    for row in course_rows
+                ]
+                plans.append({"name": plan_row["name"], "courses": courses})
+            return plans
+
+    def replace_plans(self, plans: List[Dict[str, Any]]) -> None:
+        with self.database._connect() as conn:
+            conn.execute("DELETE FROM plan_courses")
+            conn.execute("DELETE FROM plans")
+            for plan_index, plan in enumerate(plans):
+                cursor = conn.execute(
+                    "INSERT INTO plans(name, sort_order) VALUES (?, ?)",
+                    (plan["name"], plan_index),
+                )
+                for course_index, course in enumerate(plan["courses"]):
+                    conn.execute(
+                        "INSERT INTO plan_courses(plan_id, code, name, slots_json, sort_order) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (cursor.lastrowid, course.code, course.name,
+                         json.dumps(course.slots), course_index),
+                    )
+            conn.commit()
+
+    def ensure_initial_plan(self, course_repo: "CourseRepository") -> None:
+        """First run: turn the single legacy course list into Plan A."""
+        with self.database._connect() as conn:
+            existing = conn.execute("SELECT COUNT(*) AS count FROM plans").fetchone()["count"]
+        if existing > 0:
+            return
+        self.replace_plans([{"name": self.DEFAULT_PLAN_NAME, "courses": course_repo.list_courses()}])

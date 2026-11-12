@@ -2,9 +2,64 @@
 
 import argparse
 import os
+import re
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+SLOT_TYPES = ("L", "T", "P")
+CLASH_MESSAGE = (
+    "Insert failed, the time of selected units are clashed with the other "
+    "registered units, please verify"
+)  # exact text the real portal returns in a script alert
+
+
+def ensure_state(server):
+    """Attach mutable mock state to a server (idempotent).
+
+    registered   : {code: {"name", "credit", "classes": {type: group}}}
+    full_slots   : {(code, type, group)} rendered with Avail 0 and no checkbox
+    slot_times   : {(code, type, group): (day, start_hour, hours)} overrides
+    unknown_units: unit codes that return no slots
+    """
+    if not hasattr(server, "registered"):
+        server.registered = {}
+        server.full_slots = set()
+        server.slot_times = {}
+        server.unknown_units = set()
+        server.credits = {}
+        server.max_credit = 20
+        server.state_lock = threading.Lock()
+    return server
+
+
+def reset_state(server):
+    """Forget registrations and overrides (use between test cases)."""
+    ensure_state(server)
+    for name in ("registered", "full_slots", "slot_times", "unknown_units", "credits"):
+        getattr(server, name).clear()
+    return server
+
+
+def slot_time(server, code, slot_type, group):
+    """(day, start_hour, hours) for a class. Defaults never clash for up to 9
+    distinct numeric course suffixes; tests override via server.slot_times."""
+    override = ensure_state(server).slot_times.get((code, slot_type, group))
+    if override:
+        return override
+    digits = re.sub(r"\D", "", code)
+    course_index = int(digits) % 9 if digits else 0
+    index = course_index * 9 + SLOT_TYPES.index(slot_type) * 3 + (group - 1) % 3
+    return DAYS[index % 6], 7 + index // 6, 1
+
+
+def format_time(start_hour, hours):
+    def label(hour):
+        meridiem = "AM" if hour % 24 < 12 else "PM"
+        return f"{(hour - 1) % 12 + 1:02d}:00 {meridiem}"
+    return f"{label(start_hour)} - {label(start_hour + hours)}"
 
 # Real sample captcha image so the OCR path runs against a genuine JPEG.
 CAPTCHA_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", "ocr", "Kaptcha.jpg")
@@ -60,7 +115,8 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def _form(self):
         length = int(self.headers.get("Content-Length", "0"))
-        return {key: values[0] for key, values in parse_qs(self.rfile.read(length).decode()).items()}
+        self._form_lists = parse_qs(self.rfile.read(length).decode())
+        return {key: values[0] for key, values in self._form_lists.items()}
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -96,11 +152,71 @@ class MockHandler(BaseHTTPRequestHandler):
             if self.mock_server.scenario == "register-fail":
                 self._send("<div class='red'>Mock registration failed</div>")
             else:
-                self._send("<div class='red'>success</div>")
+                self._send(self._register(form.get("reqUnit", ""), self._form_lists.get("reqMid", [])))
         else:
             self._send("Not found", status=404)
 
+    def _register(self, unit_code, mids):
+        """Apply a registration like the real portal: reject full or clashing
+        classes, otherwise record it so the registered-courses page shows it."""
+        server = ensure_state(self.mock_server)
+        classes = {}
+        for mid in mids:
+            match = re.fullmatch(r"(.+)-([LTP])(\d+)", mid)
+            if match and match.group(1) == unit_code:
+                classes[match.group(2)] = int(match.group(3))
+        if not unit_code or not classes:
+            return "<script>alert('Insert failed, no class selected');</script>"
+        with server.state_lock:
+            for slot_type, group in classes.items():
+                if (unit_code, slot_type, group) in server.full_slots:
+                    return "<script>alert('Insert failed, the selected class is full');</script>"
+            for other_code, other in server.registered.items():
+                if other_code == unit_code:
+                    continue
+                for slot_type, group in classes.items():
+                    day, start, hours = slot_time(server, unit_code, slot_type, group)
+                    for other_type, other_group in other["classes"].items():
+                        o_day, o_start, o_hours = slot_time(server, other_code, other_type, other_group)
+                        if day == o_day and start < o_start + o_hours and o_start < start + hours:
+                            return f"<script>alert('{CLASH_MESSAGE}');</script>"
+            server.registered[unit_code] = {
+                "name": f"MOCK COURSE {unit_code}",
+                "credit": server.credits.get(unit_code, 3.0),
+                "classes": classes,
+            }
+        return "<div class='red'>success</div>"
+
+    def _registered_table(self):
+        """Registered-courses table in the real portal's layout."""
+        server = ensure_state(self.mock_server)
+        rows = ['<tr align="center"><td>No</td><td>Type</td><td>Group</td><td>Mode</td>'
+                '<td>Class Size</td><td>Day</td><td>Time</td><td>Hour</td><td>Week</td>'
+                '<td>Room</td><td></td></tr>']
+        number = 0
+        for index, (code, entry) in enumerate(list(server.registered.items())):
+            rows.append(
+                f'<tr valign="middle"><td class="normalTbl-sub3header" colspan="9">{code} - {entry["name"]} [MOCK] '
+                f'| Credit Hour : {entry["credit"]} | <span class="red"><b>Register - Pending for Billing</b></span></td>'
+                f'<td align="right" class="normalTbl-sub3header" colspan="2">Delete :'
+                f'<input id="reqRegId" name="reqRegId" type="checkbox" value="{7000000 + index}"></td></tr>'
+            )
+            for slot_type in SLOT_TYPES:
+                if slot_type not in entry["classes"]:
+                    continue
+                group = entry["classes"][slot_type]
+                day, start, hours = slot_time(server, code, slot_type, group)
+                number += 1
+                rows.append(
+                    f'<tr align="center"><td>{number}</td><td>{slot_type}</td><td>{group}</td><td>Physical</td>'
+                    f'<td>100</td><td>{day}</td><td>{format_time(start, hours)}</td><td>{float(hours)}</td>'
+                    f'<td>1-14</td><td>M{100 + number}</td>'
+                    f'<td><img src="ed.gif" onclick="changeClass(\'{7800000 + number}\')"></td></tr>'
+                )
+        return f'<table class="registered">{"".join(rows)}</table>'
+
     def _home_page(self, base, register=False, unit_lookup=False):
+        server = ensure_state(self.mock_server)
         register_button = '<input name="Register" value="Register Course">' if register else ""
         # Unit lookup form used by the Playwright scraper (input#reqUnit, Enter submits).
         lookup_form = (
@@ -108,40 +224,68 @@ class MockHandler(BaseHTTPRequestHandler):
             '<input type="text" id="reqUnit" name="reqUnit" value=""></form>'
             if unit_lookup else ""
         )
+        total = sum(entry["credit"] for entry in list(server.registered.values()))
+        total_text = str(int(total)) if float(total).is_integer() else str(total)
         return f"""<html><body>
 <span>Log Out</span>
 <table id="tblGrid"><tr align="left"><td>Student ID</td><td>2103370</td></tr>
-<tr align="left"><td>Total Registered Credit Hour</td><td>18</td></tr></table>
+<tr align="left"><td>Maximum Credit Hour</td><td>{server.max_credit}</td></tr>
+<tr align="left"><td>Total Registered Credit Hour</td><td>{total_text}</td></tr></table>
 {register_button}{lookup_form}
+{self._registered_table()}
 </body></html>"""
 
     def _unit_page(self, unit_code):
+        """Slot table with the real columns: No, Type, Group, Mode, Class Size,
+        Week, Day, Time, Hour, Room, Reg., Avail, Remark, checkbox."""
+        server = ensure_state(self.mock_server)
         base = self.mock_server.base_path
-        rows = "".join(
-            f'<tr align="center"><td>{unit_code}</td><td>{slot_type}</td><td>{number}</td>'
-            f'<td><input type="checkbox" name="reqMid" value="{unit_code}-{slot_type}{number}"></td></tr>'
-            for slot_type in ("L", "T", "P")
-            for number in (1, 2, 3)
-        )
+        rows = []
+        if unit_code not in server.unknown_units:
+            number = 0
+            rows.append(f'<tr><td colspan="14">{unit_code} - MOCK COURSE {unit_code}</td></tr>')
+            for slot_type in SLOT_TYPES:
+                for group in (1, 2, 3):
+                    number += 1
+                    day, start, hours = slot_time(server, unit_code, slot_type, group)
+                    full = (unit_code, slot_type, group) in server.full_slots
+                    checkbox = "" if full else (
+                        f'<input type="checkbox" name="reqMid" value="{unit_code}-{slot_type}{group}">'
+                    )
+                    rows.append(
+                        f'<tr align="center"><td>{number}</td><td>{slot_type}</td><td>{group}</td>'
+                        f'<td>Physical</td><td>30</td><td>1-14</td><td>{day}</td>'
+                        f'<td>{format_time(start, hours)}</td><td>{float(hours)}</td><td>M{100 + number}</td>'
+                        f'<td>{30 if full else 10}</td><td>{0 if full else 20}</td><td></td><td>{checkbox}</td></tr>'
+                    )
         # register-fail: browser submit shows the alert the Playwright scraper treats as failure.
         onsubmit = (
             ' onsubmit="alert(\'Please select a valid class combination\'); return false;"'
             if self.mock_server.scenario == "register-fail" else ""
         )
+        header = ('<tr align="center"><td>No</td><td>Type</td><td>Group</td><td>Mode</td><td>Class Size</td>'
+                  '<td>Week</td><td>Day</td><td>Time</td><td>Hour</td><td>Room</td><td>Reg.</td>'
+                  '<td>Avail</td><td>Remark</td><td></td></tr>')
         return f"""<html><body><form name="frmSummary" action="{base}/registration/registerUnitProSurvey.jsp" method="post"{onsubmit}>
 <input type="hidden" name="reqFregkey" value="2103370"><input type="hidden" name="reqPaperType" value="M">
 <input type="hidden" name="reqSession" value="202601"><input type="hidden" name="reqSid" value="mock-sid">
-<input type="hidden" name="reqWithClass" value="Y"><table>{rows}</table>
+<input type="hidden" name="reqWithClass" value="Y"><table>{header}{"".join(rows)}</table>
 <input type="hidden" name="reqUnit" value="{unit_code}"><input type="submit" name="Submit" value="Submit">
 </form></body></html>"""
 
 
-def run_server(host, port, scenario, delay):
+def create_server(host="127.0.0.1", port=0, scenario="success", delay=15):
+    """Build a configured mock server without starting it."""
     server = ThreadingHTTPServer((host, port), MockHandler)
     server.daemon_threads = True
     server.base_path = "/portal/courseRegStu"
     server.scenario = scenario
     server.delay = delay
+    return ensure_state(server)
+
+
+def run_server(host, port, scenario, delay):
+    server = create_server(host, port, scenario, delay)
     print(f"Mock UTAR server: http://{host}:{port}{server.base_path}")
     print(f"Scenario: {scenario}. Set UTAR_BASE_URL to the URL above.")
     server.serve_forever()
