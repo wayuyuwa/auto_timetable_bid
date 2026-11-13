@@ -23,6 +23,7 @@ import argparse
 import os
 import statistics
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -392,6 +393,8 @@ def main():
     sys.path.insert(0, ROOT)
     server, base_url = start_mock()
     os.environ["UTAR_BASE_URL"] = base_url
+    # Playwright saves every mock page it visits; keep stress runs out of logs/debug.
+    os.environ.setdefault("UTAR_DEBUG_DIR", tempfile.mkdtemp(prefix="utar_stress_pages_"))
     os.environ["UTAR_MOCK_CAPTCHA"] = "mock"  # BeautifulSoup honours this; Playwright still runs OCR
     log(f"Mock server: {base_url}")
 

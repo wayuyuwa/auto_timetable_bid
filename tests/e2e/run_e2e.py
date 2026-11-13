@@ -13,6 +13,8 @@ How it works:
   bridge to the real Python DesktopApi, so UI + backend + scrapers run for real.
 - Every case uses a fresh temporary SQLite database.
 - Writes one PNG per case and report.md to tests/e2e/screenshots/ (gitignored).
+  Playwright cases also get <case>-app/ with a screenshot + HTML of every mock
+  page the app's own browser visited (login, registration, unit, submit result).
 Exit code is 1 if any case fails.
 """
 
@@ -1003,6 +1005,10 @@ def main():
                 harness.shot(path)
                 shots.append(os.path.basename(path))
 
+            # The app's own Playwright browser saves a screenshot + HTML of every
+            # mock page it visits (diagnostics.save_page) into this case's folder.
+            app_dir = os.path.join(OUT_DIR, f"{case_id}-app")
+            os.environ["UTAR_DEBUG_DIR"] = app_dir
             started = time.time()
             print(f"[{index}/{len(selected)}] {case_id} ... ", end="", flush=True)
             try:
@@ -1017,6 +1023,8 @@ def main():
                     except Exception:
                         pass
             elapsed = time.time() - started
+            if os.path.isdir(app_dir):
+                shots += [f"{case_id}-app/{name}" for name in sorted(os.listdir(app_dir)) if name.endswith(".png")]
             print(f"{outcome} ({elapsed:.1f}s){' - ' + detail.splitlines()[0] if detail else ''}")
             results.append((case_id, title, expectation, outcome, detail, shots, elapsed))
         harness.close_app()

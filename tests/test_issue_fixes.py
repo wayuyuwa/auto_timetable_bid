@@ -269,7 +269,7 @@ class DebugPageTests(RunnerCase):
 
         out = tempfile.mkdtemp()
         SERVER.scenario = "not-active"
-        with mock.patch.object(diagnostics, "DEBUG_DUMPS", True), mock.patch.object(diagnostics, "DEBUG_DIR", out):
+        with mock.patch.object(diagnostics, "DEBUG_DUMPS", True), mock.patch.dict(os.environ, {"UTAR_DEBUG_DIR": out}):
             scraper = PlaywrightScraper()
             scraper.set_headless_mode(True)
             try:
@@ -278,11 +278,35 @@ class DebugPageTests(RunnerCase):
             finally:
                 scraper.cleanup()
         files = os.listdir(out)
-        html = [name for name in files if name.endswith(".html")]
+        html = [name for name in files if name.endswith(".html") and "login-message-notActive" in name]
         self.assertTrue(html and any(name.endswith(".png") for name in files), files)
         content = open(os.path.join(out, html[0]), encoding="utf-8").read()
         self.assertIn("study status is not allowed", content)
         self.assertNotIn("Secret-pw-77", content)
+
+
+class MockPageCaptureTests(RunnerCase):
+    def test_every_mock_page_is_captured_without_debug_dumps(self):
+        from src.scrapers.playwright_scraper import PlaywrightScraper
+
+        out = tempfile.mkdtemp()
+        with mock.patch.object(diagnostics, "DEBUG_DUMPS", False), mock.patch.dict(os.environ, {"UTAR_DEBUG_DIR": out}):
+            self.assertTrue(diagnostics.pages_enabled(), "UTAR_BASE_URL is set, so captures must be on")
+            scraper = PlaywrightScraper()
+            scraper.set_headless_mode(True)
+            try:
+                self.assertTrue(scraper.login("2103370", "pw"))
+                scraper.get_registered_courses()
+            finally:
+                scraper.cleanup()
+        files = sorted(os.listdir(out))
+        for page in ("page-login.jsp", "page-studentRegistrationSurvey.jsp", "registered-page"):
+            self.assertTrue(any(page in name and name.endswith(".png") for name in files), (page, files))
+            self.assertTrue(any(page in name and name.endswith(".html") for name in files), (page, files))
+
+    def test_no_captures_against_the_real_portal_unless_debug_dumps(self):
+        with mock.patch.object(diagnostics, "DEBUG_DUMPS", False), mock.patch.dict(os.environ, {"UTAR_BASE_URL": ""}):
+            self.assertFalse(diagnostics.pages_enabled())
 
 
 class RealServerTestModeTests(RunnerCase):

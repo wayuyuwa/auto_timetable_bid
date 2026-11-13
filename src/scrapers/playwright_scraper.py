@@ -24,7 +24,7 @@ from ..utils.config import (
     WAIT_TIME_SHORT,
 )
 from ..utils.browser_setup import missing_browser_message
-from ..utils.diagnostics import save_page, save_screenshot
+from ..utils.diagnostics import on_mock, save_page
 from ..utils.logger import setup_logger
 from .errors import (
     BrowserMissing,
@@ -176,6 +176,9 @@ class PlaywrightScraper:
     def _goto(self, url: str):
         self._check_cancellation()
         self._ensure_page().goto(url, wait_until="domcontentloaded")
+        if on_mock():
+            # Against the mock portal, keep a picture + HTML of every page visited.
+            save_page(self.page, "page-" + url.rstrip("/").rsplit("/", 1)[-1].split("?")[0])
         self._check_cancellation()
 
     LOGIN_ATTEMPTS = 3

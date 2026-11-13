@@ -31,6 +31,21 @@ def enabled() -> bool:
     return DEBUG_DUMPS
 
 
+def on_mock() -> bool:
+    """True when the app talks to a mock portal (UTAR_BASE_URL is only set for that)."""
+    return bool(os.getenv("UTAR_BASE_URL"))
+
+
+def pages_enabled() -> bool:
+    """Playwright page captures: on with debug_dumps, and always against the mock."""
+    return DEBUG_DUMPS or on_mock()
+
+
+def debug_dir() -> str:
+    """Where captures go; UTAR_DEBUG_DIR overrides logs/debug (used by the E2E run)."""
+    return os.getenv("UTAR_DEBUG_DIR") or DEBUG_DIR
+
+
 def sanitize_text(text: str) -> str:
     text = _IC_NUMBER.sub("XXXXXX-XX-XXXX", text or "")
     text = _SESSION_ID.sub(r"\1***", text)
@@ -53,9 +68,10 @@ def _path(operation: str, extension: str) -> str:
     with _counter_lock:
         _counter += 1
         number = _counter
-    os.makedirs(DEBUG_DIR, exist_ok=True)
+    folder = debug_dir()
+    os.makedirs(folder, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", operation)[:60]
-    return os.path.join(DEBUG_DIR, f"{time.strftime('%Y%m%d-%H%M%S')}-{number:04d}-{safe}.{extension}")
+    return os.path.join(folder, f"{time.strftime('%Y%m%d-%H%M%S')}-{number:04d}-{safe}.{extension}")
 
 
 def dump_http(operation: str, response, form=None):
@@ -88,8 +104,9 @@ def dump_http(operation: str, response, form=None):
 
 
 def save_page(page, operation: str):
-    """Playwright: save a screenshot and the page HTML (sanitised). Never raises."""
-    if not DEBUG_DUMPS or page is None:
+    """Playwright: save a screenshot and the page HTML (sanitised). Never raises.
+    Active with debug_dumps, and always when running against the mock portal."""
+    if not pages_enabled() or page is None:
         return None
     save_screenshot(page, operation)
     try:
@@ -106,7 +123,7 @@ def save_page(page, operation: str):
 
 def save_screenshot(page, operation: str):
     """Save a Playwright page screenshot. Never raises."""
-    if not DEBUG_DUMPS or page is None:
+    if not pages_enabled() or page is None:
         return None
     try:
         path = _path(operation, "png")

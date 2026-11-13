@@ -1,7 +1,7 @@
 # Codebase knowledge map
 
 Living map of this repo so any person or agent can find what to edit quickly.
-**Rule: whenever code, config, tests or behaviour change, update this file in the same commit** (map, "where to edit", flows and the change log at the bottom).
+**Rule: whenever code, config, tests or behaviour change, update this file in the same commit** (map, "where to edit", flows and the change log at the bottom). Every change-log row names its commit hash and files.
 
 Last updated: 2026-11-13 (issues.txt overnight run).
 
@@ -28,6 +28,7 @@ config.ini                      Portal URLs, headers, Playwright waits, [Storage
 requirements.txt                Python deps (PyQt5 only for the legacy GUI)
 .github/workflows/build-and-release.yml   Windows build on v* tags
 .claude/settings.json           {"worktree":{"bgIsolation":"none"}} - agents edit in place
+.claude/skills/utar-verify/     Skill: how to test/build/verify (commands, pitfalls, pre-commit checklist)
 
 src/
   web_backend.py                DesktopApi (Vue bridge): plans CRUD, preview_import/import_courses(mode replace|new),
@@ -65,7 +66,8 @@ src/
     timetable_reader.py         Parses UTAR timetable .txt export into Course list
     secret_store.py             DPAPI encrypt/decrypt for the saved password (Windows only)
     browser_setup.py            Playwright Chromium path for the exe (fixes PLAYWRIGHT_BROWSERS_PATH=0), status, install
-    diagnostics.py              Opt-in sanitised HTTP dumps, Playwright screenshots + page HTML (save_page) to logs/debug;
+    diagnostics.py              Sanitised HTTP dumps (debug_dumps) and Playwright screenshots + page HTML (save_page):
+                                with debug_dumps, and ALWAYS when UTAR_BASE_URL (mock) is set; folder = UTAR_DEBUG_DIR or logs/debug;
                                 masks password, captcha, student ID, cookies, jsessionid/passid tokens, IC numbers
     process_guard.py            Windows job object: children (Chromium, driver, WebView2) die with the app
     captcha_solver.py, ocr/     ONNX captcha OCR (common_old.onnx + charset); one shared model per process,
@@ -187,19 +189,24 @@ Last known: see docs/run-report.md (issues.txt run).
 
 ## Change log (newest first)
 
-- 2026-11-13 15:10 run: real-portal logs showed accounts refused via `login.jsp?message=notActive|notConsultAdviser`
-  being misreported (BS: "portal closed", Playwright: "did not answer"). New AccountNotAllowed + portal_rejection,
-  mock scenarios not-active/not-adviser, Playwright saves page HTML on debug, student ID and passid masked in
-  dumps, login errors logged, OCR model shared and warmed up at start.
-- 2026-11-13 issues.txt run: tabbed UI, toast queue, pre-flight steps (works without a plan), Stopping status,
-  elapsed timers, login retry progress + typed login errors + login error panel, scheduled start modes and
-  closed-portal login retry, password toggle, drag-and-drop + import mode, saved credentials (DPAPI),
-  diagnostics/log level, Playwright browser path fix + install button, process guard, `--test-real-server`,
-  smaller bundle (no src/ copy). See docs/run-report.md.
-- 2026-11-13: Added this knowledge map and `CLAUDE.md`.
-- `bb2b1ed`: Fix freeze when portal expires session right after login (RLock relogin guard, Stop safety net, mock `closed` scenario, table layout).
-- `954460a`: New icon, README for plans/verified status/retry/schedule.
-- `7623eff`: Plans UI, verified status board, retry, schedule, preflight.
-- `7c0b0f7`: Plan runner backend.
-- `6fe40f2`: BS cancel responsive (no read-timeout retries).
-- `126dcd0`: Stress harness.
+Every change is listed with its git commit, so `git show <hash>` gives the exact diff.
+A commit cannot contain its own hash, so a new entry is first written as `(pending)` and the
+hash is filled in by the next commit. Run `git log --oneline` for anything missing here.
+
+| Commit | Date | What changed | Files |
+|---|---|---|---|
+| (pending) | 2026-11-13 | Skill `utar-verify` (test/build/verify routine). Mock runs: Playwright saves a screenshot + sanitised HTML of **every page it visits** whenever `UTAR_BASE_URL` is set (always on for the mock, even without `debug_dumps`); `UTAR_DEBUG_DIR` overrides the folder. E2E: each case gets `screenshots/<case>-app/` with the app browser's pages, linked in report.md. Unit/stress tests send captures to a temp dir. Change log converted to this commit table. | src/utils/diagnostics.py, src/scrapers/playwright_scraper.py, tests/e2e/run_e2e.py, tests/test_issue_fixes.py, tests/test_plan_runner.py, tests/stress/run_stress.py, .claude/skills/utar-verify/SKILL.md, CLAUDE.md, docs/KNOWLEDGE.md |
+| `4339c08` | 2026-11-13 | `build_exe.py` keeps the user's dist `data/`, `logs/`, `config.ini` across rebuilds (copy in build/keep-user-files); run 2 report | build_exe.py, docs/run-report.md |
+| `b2375b7` | 2026-11-13 | Playwright `save_page()` (screenshot + HTML) on debug for failed/refused logins, registered page, submit results; dumps mask student ID and `passid`; one shared OCR model, warmed up at app start | src/utils/diagnostics.py, src/utils/captcha_solver.py, src/web_backend.py |
+| `8a93f2b` | 2026-11-13 | Real-portal logs: account refused via `login.jsp?message=notActive / notConsultAdviser` was misreported (BS "portal closed", Playwright "did not answer"). New `AccountNotAllowed` + `portal_rejection()`; login errors logged; mock scenarios `not-active` / `not-adviser`; UI login panel text; tests | src/scrapers/errors.py, src/scrapers/beautifulsoup_scraper.py, src/scrapers/playwright_scraper.py, src/mock_server.py, src/services/plan_runner.py, web/src/App.vue, tests/test_issue_fixes.py, tests/e2e/run_e2e.py, docs/KNOWLEDGE.md |
+| `674f335` | 2026-11-13 | Smaller exe (231 → 221 MB): only OCR model files as data, no ddddocr, excludes tkinter + Pillow AVIF, copies config.ini; `tools/bundle_size.py`; README; issues.txt run report | build_exe.py, tools/bundle_size.py, README.md, docs/KNOWLEDGE.md, docs/run-report.md |
+| `314d9bd` | 2026-11-13 | Tabbed UI (Courses, Login & settings, Pre-flight, Registration, Logs); run chip with phase/elapsed/countdown; Stopping status; toast queue; pre-flight steps; login error panel; password toggle; start now/at/after; drag-and-drop + import mode dialog; E2E +13 cases | web/src/App.vue, web/src/style.css, tests/e2e/run_e2e.py |
+| `9d89b35` | 2026-11-13 | Saved login (DPAPI); Playwright browser path fix for the exe + install button; log level + sanitised debug dumps; Windows job-object process guard; `--test-real-server`; import preview/modes; default portal URLs fixed | src/utils/secret_store.py, src/utils/browser_setup.py, src/utils/diagnostics.py, src/utils/process_guard.py, src/utils/config.py, config.ini, src/web_backend.py, src/real_server_test.py, main.py, tests/test_issue_fixes.py |
+| `a4d8f4d` | 2026-11-13 | Login retries with progress + typed errors (InvalidCredentials / PortalClosed / PortalUnavailable / BrowserMissing), stop after 2 "closed" answers, no nested relogin; runner status fields (steps, log, login, stopping, timers, error source/kind); pre-flight without a plan; scheduled start retries login while closed | src/scrapers/errors.py, src/scrapers/beautifulsoup_scraper.py, src/scrapers/playwright_scraper.py, src/services/plan_runner.py, tests/test_plan_runner.py |
+| `05ed3a8` | 2026-11-13 | This knowledge map + `CLAUDE.md` | CLAUDE.md, docs/KNOWLEDGE.md |
+| `bb2b1ed` | 2026-11-12 | Fix freeze when the portal expires the session right after login (RLock relogin guard, Stop safety net, mock `closed`, table layout) | src/scrapers/beautifulsoup_scraper.py, src/web_backend.py, src/mock_server.py, web/src/style.css, tests |
+| `954460a` | 2026-11-12 | New icon, README for plans/verified status/retry/schedule | resources/icon.ico, README.md |
+| `7623eff` | 2026-11-12 | Plans UI, verified status board, retry, schedule, pre-flight in the app | web/src/App.vue, web/src/style.css |
+| `7c0b0f7` | 2026-11-12 | Plan runner backend: verified status, plan fallback, retry, schedule, pre-flight | src/services/plan_runner.py, src/scrapers/*, src/storage/database.py |
+| `6fe40f2` | 2026-11-12 | BeautifulSoup cancel responsive (no read-timeout retries) | src/scrapers/beautifulsoup_scraper.py |
+| `126dcd0` | 2026-11-12 | Stress-test harness | tests/stress/run_stress.py |

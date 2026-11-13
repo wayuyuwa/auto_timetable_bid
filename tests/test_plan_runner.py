@@ -5,6 +5,7 @@ Run on its own (config reads UTAR_BASE_URL at import time):
 """
 
 import os
+import tempfile
 import threading
 import time
 import unittest
@@ -14,6 +15,8 @@ from src.mock_server import CLASH_MESSAGE, create_server, reset_state
 SERVER = create_server()
 threading.Thread(target=SERVER.serve_forever, daemon=True).start()
 os.environ["UTAR_BASE_URL"] = f"http://127.0.0.1:{SERVER.server_port}{SERVER.base_path}"
+# Playwright captures every mock page; keep them out of logs/debug during tests.
+os.environ.setdefault("UTAR_DEBUG_DIR", tempfile.mkdtemp(prefix="utar_test_pages_"))
 os.environ["UTAR_MOCK_CAPTCHA"] = "mock"
 
 from src.models.course import Course  # noqa: E402
