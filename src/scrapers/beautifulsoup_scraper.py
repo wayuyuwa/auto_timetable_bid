@@ -20,7 +20,7 @@ from ..utils.captcha_solver import CaptchaSolver
 from ..utils.logger import setup_logger
 from ..models.course import Course
 from ..utils.diagnostics import dump_http
-from .errors import InvalidCredentials, LoginError, PortalClosed, PortalUnavailable
+from .errors import InvalidCredentials, LoginError, PortalClosed, PortalUnavailable, portal_rejection
 from .html_parser import (
     find_course_value,
     parse_home_page,
@@ -33,6 +33,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configure logging
 logger = setup_logger(__name__)
+
+LOGIN_MESSAGE_REDIRECT = re.compile(r"login\.jsp\?message=([A-Za-z]+)")
+
 
 class SessionExpiredException(Exception):
     """Exception raised when the session has expired."""
@@ -397,6 +400,21 @@ class BeautifulSoupScraper:
             )
         raise PortalUnavailable(f"Login failed after {len(reasons)} attempt(s). ({summary})", reasons)
 
+    def _portal_message(self, code: str) -> str:
+        """Red message text the portal shows on login.jsp?message=<code>."""
+        try:
+            response = self.session.get(f"{LOGIN_URL}?message={code}", headers=self.headers, verify=False,
+                                        timeout=self.connection_timeout)
+            dump_http(f"login-message-{code}", response)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for element in soup.select('.red'):
+                text = " ".join(element.get_text(" ").split())
+                if text:
+                    return text
+        except requests.RequestException as error:
+            logger.debug("Could not read the portal message for %s: %s", code, error)
+        return ""
+
     def _login_once(self, student_id, password, attempt, max_retries):
         """One login attempt. Returns (None, False) on success, else
         (reason, looks_closed). Raises InvalidCredentials or on cancellation."""
@@ -443,6 +461,16 @@ class BeautifulSoupScraper:
 
             if 'Invalid code' in login_response.text:
                 return "Wrong captcha", False
+            # The portal refuses some logins by sending the browser back to
+            # login.jsp?message=<code> (seen: loginError, notActive, notConsultAdviser).
+            redirect = LOGIN_MESSAGE_REDIRECT.search(login_response.text)
+            if redirect:
+                code = redirect.group(1)
+                text = self._portal_message(code)
+                rejection = portal_rejection(code, text)
+                if rejection is not None:
+                    raise rejection
+                return f"Portal sent the login back ({code}): {text or 'no message'}", False
             if 'Invalid' in login_response.text:
                 self._is_logged_in = False
                 raise InvalidCredentials("Login failed: the portal rejected the student ID or password. "

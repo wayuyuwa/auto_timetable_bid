@@ -416,14 +416,17 @@ class PlanRunner:
             outcome = self._scraper.login(student_id, password)
         except InvalidCredentials as error:
             self._check_cancel()
+            logger.warning("Login rejected (%s): %s", error.kind, error)
             raise RunError(str(error), "login", error.kind) from error
         except LoginError as error:
             self._check_cancel()
+            logger.warning("Login failed (%s): %s", error.kind, error)
             if error.attempts:
                 self.board.mutate(lambda data: data["login"].update(reasons=list(error.attempts)))
             raise RunError(str(error), "login", error.kind) from error
         except BrowserMissing as error:
             self._check_cancel()
+            logger.warning("Login failed (%s): %s", error.kind, error)
             raise RunError(str(error), "login", error.kind) from error
         except Exception as error:  # noqa: BLE001
             self._check_cancel()

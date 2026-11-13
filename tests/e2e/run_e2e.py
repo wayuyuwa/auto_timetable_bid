@@ -841,6 +841,22 @@ def _(h, shot):
     shot("_2_cleared")
 
 
+@case("login_03_account_refused", "UTAR refuses the account (study status)",
+      "Login panel shows UTAR's own reason, no retries, not reported as 'portal closed'")
+def _(h, shot):
+    h.open_app(courses=[MOCK_COURSE], scenario="not-active")
+    h.fill_credentials()
+    h.page.get_by_role("button", name="Run pre-flight check").click()
+    status = h.wait_run_finished()
+    panel = h.page.locator(".login-error")
+    panel.wait_for()
+    shot()
+    check(status["error_kind"] == "account_not_allowed", f"kind {status['error_kind']}")
+    text = panel.inner_text()
+    check("UTAR refused this account" in text and "study status is not allowed" in text, f"panel {text[:300]}")
+    check("registration may be closed" not in text, "misreported as portal closed")
+
+
 @case("login_02_remember_credentials", "Remember the login (encrypted)", "Reopened app is prefilled; untick forgets it")
 def _(h, shot):
     h.open_app(courses=[MOCK_COURSE], db_name="cred.db")

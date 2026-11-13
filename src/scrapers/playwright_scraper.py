@@ -3,7 +3,9 @@
 import functools
 import json
 import queue
+import re
 import threading
+import time
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from threading import Event
@@ -22,9 +24,16 @@ from ..utils.config import (
     WAIT_TIME_SHORT,
 )
 from ..utils.browser_setup import missing_browser_message
-from ..utils.diagnostics import save_screenshot
+from ..utils.diagnostics import save_page, save_screenshot
 from ..utils.logger import setup_logger
-from .errors import BrowserMissing, InvalidCredentials, LoginError, PortalClosed, PortalUnavailable
+from .errors import (
+    BrowserMissing,
+    InvalidCredentials,
+    LoginError,
+    PortalClosed,
+    PortalUnavailable,
+    portal_rejection,
+)
 from .html_parser import parse_home_page, parse_registered_courses, parse_unit_slots
 
 logger = setup_logger(__name__)
@@ -199,7 +208,7 @@ class PlaywrightScraper:
                 return True
             reasons.append(reason)
             logger.warning("Playwright login attempt %s/%s failed: %s", attempt, attempts, reason)
-            save_screenshot(page, f"login-attempt-{attempt}")
+            save_page(page, f"login-attempt-{attempt}")
             closed_streak = closed_streak + 1 if closed else 0
             if closed_streak >= self.CLOSED_AFTER:
                 break
@@ -214,6 +223,42 @@ class PlaywrightScraper:
                 "then answered 'session expired'; course registration may be closed right now. "
                 f"({summary})", reasons)
         raise PortalUnavailable(f"Login failed after {len(reasons)} attempt(s). ({summary})", reasons)
+
+    def _wait_login_outcome(self, page) -> str:
+        """After submitting the login form, wait until the portal decides:
+        "ok" (Log Out shown), "invalid", "expired", "message:<code>" (sent back
+        to login.jsp?message=<code>) or "timeout"."""
+        deadline = time.time() + WAIT_TIME_LONG
+        while True:
+            self._check_cancellation()
+            url = page.url
+            match = re.search(r"login\.jsp\?message=([A-Za-z]+)", url)
+            if match:
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=WAIT_TIME_LONG * 1000)
+                except PlaywrightTimeoutError:
+                    pass
+                return f"message:{match.group(1)}"
+            if "sessionExpired" in url:
+                return "expired"
+            try:
+                if page.locator("span:has-text('Log Out')").count():
+                    return "ok"
+                if page.locator(":text('Invalid')").count():
+                    return "invalid"
+            except PlaywrightError:
+                pass  # page is navigating
+            if time.time() >= deadline:
+                return "expired" if self._looks_expired(page) else "timeout"
+            page.wait_for_timeout(150)
+
+    @staticmethod
+    def _red_text(page) -> str:
+        try:
+            texts = [" ".join(t.split()) for t in page.locator(".red").all_inner_texts()]
+        except PlaywrightError:
+            return ""
+        return next((text for text in texts if text), "")
 
     @staticmethod
     def _looks_expired(page) -> bool:
@@ -234,15 +279,21 @@ class PlaywrightScraper:
             page.locator("input[name=kaptchafield]").fill(self.captcha_solver.solve(captcha_bytes))
             self._check_cancellation()
             page.locator("input[name=kaptchafield]").press("Enter")
-            outcome = page.locator("span:has-text('Log Out'), :text('Invalid')").first
-            try:
-                outcome.wait_for(state="visible", timeout=WAIT_TIME_LONG * 1000)
-            except PlaywrightTimeoutError:
-                self._check_cancellation()
-                if self._looks_expired(page):
-                    return "Portal answered session expired at login", True
-                return f"The portal did not answer within {WAIT_TIME_LONG:g}s", False
+            outcome = self._wait_login_outcome(page)
             self._check_cancellation()
+            if outcome == "expired":
+                return "Portal answered session expired at login", True
+            if outcome.startswith("message:"):
+                code = outcome.split(":", 1)[1]
+                text = self._red_text(page)
+                save_page(page, f"login-message-{code}")
+                rejection = portal_rejection(code, text)
+                if rejection is not None:
+                    raise rejection
+                return f"Portal sent the login back ({code}): {text or 'no message'}", False
+            if outcome == "timeout":
+                save_page(page, "login-no-answer")
+                return f"The portal did not answer within {WAIT_TIME_LONG:g}s", False
             body = page.content()
             if "Invalid code" in body:
                 return "Wrong captcha", False
@@ -280,6 +331,7 @@ class PlaywrightScraper:
             self._is_logged_in = False
             raise RuntimeError("Session expired")
         html = page.content()
+        save_page(page, "registered-page")
         return {"courses": parse_registered_courses(html), "info": parse_home_page(html)}
 
     @_on_owner_thread
@@ -349,6 +401,7 @@ class PlaywrightScraper:
         except PlaywrightTimeoutError:
             pass
         message = dialog_message[0] if dialog_message else ""
+        save_page(page, f"register-result-{course.code}")
         if "valid class combination" in message.lower():
             return "Invalid timetable", False
         if "failed" in message.lower():

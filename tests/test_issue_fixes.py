@@ -73,6 +73,50 @@ class LoginTests(RunnerCase):
         self.assertIn("All courses registered successfully.", texts)
 
 
+class AccountRefusedTests(RunnerCase):
+    """Real portal (logs 2026-11-13): an accepted password can still be refused,
+    with a redirect to login.jsp?message=notActive / notConsultAdviser."""
+
+    def run_method(self, method, scenario):
+        SERVER.scenario = scenario
+        started = time.time()
+        runner = PlanRunner([plan("Plan A", course("MOCK1001", L=[1]))], method=method, headless=True,
+                            board=StatusBoard())
+        runner.run("2103370", "pw")
+        return runner.board.snapshot(), time.time() - started
+
+    def check_refused(self, method, scenario, text):
+        status, elapsed = self.run_method(method, scenario)
+        self.assertEqual((status["phase"], status["error_source"], status["error_kind"]),
+                         ("error", "login", "account_not_allowed"), status["message"])
+        self.assertIn(text, status["message"])
+        self.assertEqual(status["login"]["attempt"], 1, "a refused account must not be retried")
+        self.assertNotIn("registration may be closed", status["message"])
+        self.assertLess(elapsed, 45)  # generous: a busy PC slows the browser; attempt==1 is the real check
+        self.assertEqual(SERVER.registered, {})
+
+    def test_bs_not_active(self):
+        self.check_refused("BeautifulSoup", "not-active", "study status is not allowed")
+
+    def test_bs_not_consult_adviser(self):
+        self.check_refused("BeautifulSoup", "not-adviser", "notConsultAdviser")
+
+    def test_playwright_not_active(self):
+        self.check_refused("Playwright", "not-active", "study status is not allowed")
+
+    def test_playwright_not_consult_adviser(self):
+        self.check_refused("Playwright", "not-adviser", "notConsultAdviser")
+
+    def test_scheduled_start_does_not_retry_a_refused_account(self):
+        SERVER.scenario = "not-active"
+        runner = PlanRunner([plan("Plan A", course("MOCK1001", L=[1]))],
+                            options={"start_at": time.time() + 30}, board=StatusBoard())
+        started = time.time()
+        runner.run("2103370", "pw")
+        self.assertEqual(runner.board.snapshot()["error_kind"], "account_not_allowed")
+        self.assertLess(time.time() - started, 15)
+
+
 class ScheduleTests(RunnerCase):
     def test_scheduled_start_retries_login_while_closed_then_bids(self):
         SERVER.scenario = "closed"
@@ -164,6 +208,7 @@ class DesktopApiTests(unittest.TestCase):
                 api.preview_import(name, text)
 
     def test_preflight_allowed_without_courses(self):
+        SERVER.scenario = "success"  # other test classes may leave a failing scenario behind
         api = new_api()
         api.save_plans([{"name": "Plan A", "courses": []}])
         api.preflight("2103370", "pw")
@@ -204,14 +249,40 @@ class BrowserPathTests(unittest.TestCase):
 
 class DiagnosticsTests(unittest.TestCase):
     def test_sanitizers_mask_secrets(self):
-        self.assertEqual(diagnostics.sanitize_form({"reqPassword": "x", "reqFregkey": "1"}),
-                         {"reqPassword": "***", "reqFregkey": "1"})
+        self.assertEqual(diagnostics.sanitize_form({"reqPassword": "x", "reqUnit": "1"}),
+                         {"reqPassword": "***", "reqUnit": "1"})
         self.assertEqual(diagnostics.sanitize_headers({"Cookie": "JSESSIONID=abc", "Accept": "a"}),
                          {"Cookie": "***", "Accept": "a"})
-        text = diagnostics.sanitize_text("IC 990101-14-5678 url;jsessionid=ABC123 <input name='reqPassword' value='pw'>")
+        text = diagnostics.sanitize_text("IC 990101-14-5678 url;jsessionid=ABC123 <input name='reqPassword' value='pw'>"
+                                         " indexSurvey.jsp?passid=TOKEN%3D <input name='reqFregkey' value='2103370'>")
         self.assertNotIn("990101-14-5678", text)
         self.assertNotIn("ABC123", text)
+        self.assertNotIn("TOKEN", text)
+        self.assertNotIn("2103370", text)
+        self.assertEqual(diagnostics.sanitize_form({"reqFregkey": "2103370"}), {"reqFregkey": "***"})
         self.assertNotIn("value='pw'", text)
+
+
+class DebugPageTests(RunnerCase):
+    def test_playwright_saves_sanitised_html_and_screenshot(self):
+        from src.scrapers.playwright_scraper import PlaywrightScraper
+
+        out = tempfile.mkdtemp()
+        SERVER.scenario = "not-active"
+        with mock.patch.object(diagnostics, "DEBUG_DUMPS", True), mock.patch.object(diagnostics, "DEBUG_DIR", out):
+            scraper = PlaywrightScraper()
+            scraper.set_headless_mode(True)
+            try:
+                with self.assertRaises(Exception):
+                    scraper.login("2103370", "Secret-pw-77")
+            finally:
+                scraper.cleanup()
+        files = os.listdir(out)
+        html = [name for name in files if name.endswith(".html")]
+        self.assertTrue(html and any(name.endswith(".png") for name in files), files)
+        content = open(os.path.join(out, html[0]), encoding="utf-8").read()
+        self.assertIn("study status is not allowed", content)
+        self.assertNotIn("Secret-pw-77", content)
 
 
 class RealServerTestModeTests(RunnerCase):

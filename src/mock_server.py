@@ -93,7 +93,17 @@ function validate(){{
 <input type="reset" value="Reset" name="reset" class="button"></td></tr>
 </table>
 </form>
+<div class="red"  style="font-size:11px">{message}</div>
 </body></html>"""
+
+# Messages the real portal shows on login.jsp?message=<code> (codes seen in the
+# owner's debug logs, 2026-11-13). notConsultAdviser wording is a stand-in.
+PORTAL_MESSAGES = {
+    "loginError": "Invalid Student ID or Password",
+    "notActive": "Your study status is not allowed to access this system, please check with faculty officer",
+    "notConsultAdviser": "You have not consulted your academic adviser. Please consult your adviser before registration",
+}
+SCENARIO_REJECTIONS = {"not-active": "notActive", "not-adviser": "notConsultAdviser"}
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -123,7 +133,8 @@ class MockHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         base = self.mock_server.base_path
         if path == f"{base}/login.jsp":
-            self._send(LOGIN_PAGE.format(tmp=int(time.time() * 1000)))
+            code = parse_qs(urlparse(self.path).query).get("message", [""])[0]
+            self._send(LOGIN_PAGE.format(tmp=int(time.time() * 1000), message=PORTAL_MESSAGES.get(code, "")))
         elif path.endswith("/Kaptcha.jpg"):
             with open(CAPTCHA_IMAGE, "rb") as image:
                 self._send(image.read(), content_type="image/jpeg")
@@ -146,6 +157,11 @@ class MockHandler(BaseHTTPRequestHandler):
         if path == f"{base}/loginProSurvey.jsp":
             if self.mock_server.scenario == "session-expired":
                 self._send("<script>window.parent.location.href='sessionExpired.jsp'</script>")
+            elif self.mock_server.scenario in SCENARIO_REJECTIONS:
+                # Real portal: the account is refused and the browser is sent
+                # back to the login page with a reason code.
+                code = SCENARIO_REJECTIONS[self.mock_server.scenario]
+                self._send(f"<script>location.href='{base}/login.jsp?message={code}'</script>")
             elif form.get("reqFregkey") == "invalid":
                 self._send("<div>Invalid Student ID or Password</div>")
             else:
@@ -306,7 +322,7 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--scenario",
-        choices=("success", "register-fail", "timeout", "session-expired", "closed"),
+        choices=("success", "register-fail", "timeout", "session-expired", "closed", "not-active", "not-adviser"),
         default="success",
     )
     parser.add_argument("--delay", type=float, default=15, help="Timeout scenario delay in seconds")

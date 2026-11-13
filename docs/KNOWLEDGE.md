@@ -20,7 +20,8 @@ UTAR course-registration bidding desktop app.
 ```
 main.py                         Entry point: src.web_backend.run(); `--test-real-server` runs src/real_server_test.py
 main2.py                        Standalone OCR timing demo (not used by the app)
-build_exe.py / build.bat        PyInstaller onedir build; bundles web/dist + OCR model files only (not all of src/)
+build_exe.py / build.bat        PyInstaller onedir build; bundles web/dist + OCR model files only (not all of src/);
+                                keeps the user's dist data/, logs/ and config.ini across rebuilds (build/keep-user-files)
 tools/bundle_size.py            Size report of dist/UnitRegTimetable (largest folders/files)
 config.ini                      Portal URLs, headers, Playwright waits, [Storage] db path,
                                 [Logging] level (env UTAR_LOG_LEVEL overrides) and debug_dumps (env UTAR_DEBUG_DUMPS)
@@ -43,7 +44,8 @@ src/
     bidding_service.py          LEGACY single-list service (used by legacy PyQt GUI only)
     worker_thread.py            LEGACY QThread worker (PyQt)
   scrapers/
-    errors.py                   LoginError -> InvalidCredentials / PortalClosed / PortalUnavailable; BrowserMissing
+    errors.py                   LoginError -> InvalidCredentials / AccountNotAllowed / PortalClosed / PortalUnavailable;
+                                BrowserMissing; portal_rejection(code, text) maps login.jsp?message=<code> redirects
     beautifulsoup_scraper.py    requests-based scraper: login() loops _login_once() (progress callback, typed errors,
                                 stops after 2 "closed" answers), relogin (RLock + _relogin_active guard; no nested
                                 relogin inside login), register_courses, get_registered_courses, get_unit_slots
@@ -63,12 +65,15 @@ src/
     timetable_reader.py         Parses UTAR timetable .txt export into Course list
     secret_store.py             DPAPI encrypt/decrypt for the saved password (Windows only)
     browser_setup.py            Playwright Chromium path for the exe (fixes PLAYWRIGHT_BROWSERS_PATH=0), status, install
-    diagnostics.py              Opt-in sanitised HTTP dumps + screenshots to logs/debug
+    diagnostics.py              Opt-in sanitised HTTP dumps, Playwright screenshots + page HTML (save_page) to logs/debug;
+                                masks password, captcha, student ID, cookies, jsessionid/passid tokens, IC numbers
     process_guard.py            Windows job object: children (Chromium, driver, WebView2) die with the app
-    captcha_solver.py, ocr/     ONNX captcha OCR (common_old.onnx + charset)
+    captcha_solver.py, ocr/     ONNX captcha OCR (common_old.onnx + charset); one shared model per process,
+                                warm_up() loads it in the background at app start
   gui/                          LEGACY PyQt5 GUI (main_window, course_manager). Not used by main.py.
   mock_server.py                Local mock of the UTAR portal. Scenarios: success, register-fail, timeout,
-                                session-expired, closed. Serves the real sample Kaptcha.jpg.
+                                session-expired, closed, not-active, not-adviser (login refused with
+                                login.jsp?message=<code>). Serves the real sample Kaptcha.jpg.
 
 web/
   src/App.vue                   Whole UI. Header (title, run chip with phase/elapsed/countdown, Start/Pre-flight/Stop),
@@ -132,7 +137,7 @@ Not tracked / ignore: `src-tauri/` (leftover from the `tauri-rust` branch), `dis
 
 **Phases:** idle, login, scheduled, preflight, preflight_done, bidding, verifying, awaiting_choice, waiting_retry, complete, error, cancelled. `stopping=True` (with running) means Stop was pressed and the run is finishing its current call.
 
-**Login errors (scrapers/errors.py → status.error_kind):** invalid_credentials (stop; UI blocks Start until the credentials change), portal_closed (login accepted, then "session expired" = registration not open), portal_unavailable (no/odd response), browser_missing (Playwright Chromium not installed). error_source "login" shows the panel in Login & settings.
+**Login errors (scrapers/errors.py → status.error_kind):** invalid_credentials (stop; UI blocks Start until the credentials change), account_not_allowed (password accepted but UTAR refuses the account: the real portal redirects to `login.jsp?message=notActive` "study status is not allowed..." or `notConsultAdviser`; `loginError` = wrong ID/password; stop, no retry, shows UTAR's red text), portal_closed (login accepted, then "session expired" = registration not open), portal_unavailable (no/odd response), browser_missing (Playwright Chromium not installed). error_source "login" shows the panel in Login & settings.
 
 **Scheduled start (task 16 decision):** log in `prelogin_seconds` (60) before the start; if the portal looks closed/unreachable keep retrying the *login only* every 10 s until 180 s after the start (logging in never bids); at the start, `_refresh_registered` re-logs in once if the session expired. Bids are never retried blindly: every pass re-reads the registered list first. UI modes: now / at clock time / after N minutes (counted from clicking Start).
 
@@ -182,6 +187,10 @@ Last known: see docs/run-report.md (issues.txt run).
 
 ## Change log (newest first)
 
+- 2026-11-13 15:10 run: real-portal logs showed accounts refused via `login.jsp?message=notActive|notConsultAdviser`
+  being misreported (BS: "portal closed", Playwright: "did not answer"). New AccountNotAllowed + portal_rejection,
+  mock scenarios not-active/not-adviser, Playwright saves page HTML on debug, student ID and passid masked in
+  dumps, login errors logged, OCR model shared and warmed up at start.
 - 2026-11-13 issues.txt run: tabbed UI, toast queue, pre-flight steps (works without a plan), Stopping status,
   elapsed timers, login retry progress + typed login errors + login error panel, scheduled start modes and
   closed-portal login retry, password toggle, drag-and-drop + import mode, saved credentials (DPAPI),

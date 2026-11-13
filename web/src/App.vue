@@ -580,6 +580,7 @@ const LOGIN_TITLES = {
   portal_closed: "Logged in, but UTAR closed the session at once",
   portal_unavailable: "The portal did not respond properly",
   browser_missing: "The Playwright browser is not installed",
+  account_not_allowed: "UTAR refused this account",
   login: "Login failed",
 };
 
@@ -751,6 +752,7 @@ onUnmounted(() => {
           <ol v-if="loginError.reasons.length > 1" class="attempt-list"><li v-for="(reason, index) in loginError.reasons" :key="index">{{ reason }}</li></ol>
           <p v-if="loginError.kind === 'invalid_credentials'" class="hint">Correct the student ID or password below; Start is blocked until you change them.</p>
           <p v-else-if="loginError.kind === 'portal_closed'" class="hint">This usually means course registration is not open yet. Use a scheduled start: the app keeps retrying the login (never bidding) until shortly after the start time.</p>
+          <p v-else-if="loginError.kind === 'account_not_allowed'" class="hint">The student ID and password were accepted, but UTAR will not let this account into course registration. The reason above is UTAR's own message; it has to be resolved with UTAR (faculty officer or academic adviser). The app cannot bypass it, and retrying will not help until it is resolved.</p>
           <p v-else-if="loginError.kind === 'browser_missing'" class="hint">Install the browser below, or switch the connection method to BeautifulSoup.</p>
         </div>
         <label>Student ID<input v-model.trim="credentials.studentId" :class="{ invalid: credentialsRejected }" autocomplete="username" placeholder="e.g. 2103370" /></label>
