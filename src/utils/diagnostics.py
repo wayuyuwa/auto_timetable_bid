@@ -16,10 +16,12 @@ from .logger import setup_logger
 logger = setup_logger(__name__)
 
 MAX_BODY = 20_000
-SECRET_FIELDS = {"reqpassword", "password", "kaptchafield", "prekap"}
+# reqFregkey is the student ID: personal data, not needed to debug a run.
+SECRET_FIELDS = {"reqpassword", "password", "kaptchafield", "prekap", "reqfregkey"}
 SECRET_HEADERS = {"cookie", "set-cookie", "authorization"}
 _IC_NUMBER = re.compile(r"\b\d{6}-\d{2}-\d{4}\b")
-_SESSION_ID = re.compile(r"(jsessionid=)[^;&\s\"']+", re.IGNORECASE)
+_SESSION_ID = re.compile(r"(jsessionid=|passid=)[^;&\s\"']+", re.IGNORECASE)
+_STUDENT_ID_VALUE = re.compile(r"(name=[\"']?reqFregkey[\"']?[^>]*value=[\"'])[^\"']*", re.IGNORECASE)
 _PASSWORD_VALUE = re.compile(r"(name=[\"']?reqPassword[\"']?[^>]*value=[\"'])[^\"']*", re.IGNORECASE)
 _counter_lock = threading.Lock()
 _counter = 0
@@ -32,6 +34,7 @@ def enabled() -> bool:
 def sanitize_text(text: str) -> str:
     text = _IC_NUMBER.sub("XXXXXX-XX-XXXX", text or "")
     text = _SESSION_ID.sub(r"\1***", text)
+    text = _STUDENT_ID_VALUE.sub(r"\1***", text)
     return _PASSWORD_VALUE.sub(r"\1***", text)
 
 
@@ -81,6 +84,23 @@ def dump_http(operation: str, response, form=None):
         return path
     except Exception as error:  # noqa: BLE001 - diagnostics must never break a run
         logger.debug("Could not write HTTP dump for %s: %s", operation, error)
+        return None
+
+
+def save_page(page, operation: str):
+    """Playwright: save a screenshot and the page HTML (sanitised). Never raises."""
+    if not DEBUG_DUMPS or page is None:
+        return None
+    save_screenshot(page, operation)
+    try:
+        html = sanitize_text(page.content())
+        path = _path(operation, "html")
+        with open(path, "w", encoding="utf-8") as file:
+            file.write(f"<!-- {operation} | {time.strftime('%Y-%m-%d %H:%M:%S')} | {sanitize_text(page.url)} -->\n")
+            file.write(html)
+        return path
+    except Exception as error:  # noqa: BLE001
+        logger.debug("Could not save page HTML for %s: %s", operation, error)
         return None
 
 

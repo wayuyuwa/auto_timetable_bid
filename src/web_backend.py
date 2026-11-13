@@ -300,6 +300,9 @@ def run():
 
     kill_children_on_exit()
     browser_setup.configure_browsers_path()
+    from .utils.captcha_solver import warm_up
+
+    warm_up()  # load the captcha model now, not during the first login
     api = DesktopApi()
     atexit.register(api.cleanup)
     index_path = _frontend_index_path()
