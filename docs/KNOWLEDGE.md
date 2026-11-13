@@ -29,6 +29,9 @@ requirements.txt                Python deps (PyQt5 only for the legacy GUI)
 .github/workflows/build-and-release.yml   Windows build on v* tags
 .claude/settings.json           {"worktree":{"bgIsolation":"none"}} - agents edit in place
 .claude/skills/utar-verify/     Skill: how to test/build/verify (commands, pitfalls, pre-commit checklist)
+.claude/skills/systematic-debugging/, verification-before-completion/
+                                Skills adapted from obra/superpowers (MIT, LICENSE-superpowers.txt inside):
+                                root cause before fixes; evidence (command + counts) before "done" claims
 
 src/
   web_backend.py                DesktopApi (Vue bridge): plans CRUD, preview_import/import_courses(mode replace|new),
@@ -195,6 +198,7 @@ hash is filled in by the next commit. Run `git log --oneline` for anything missi
 
 | Commit | Date | What changed | Files |
 |---|---|---|---|
+| (pending) | 2026-11-13 | Adopted proven public skills after reading them: `systematic-debugging` (+ `root-cause-tracing.md`) and `verification-before-completion` from obra/superpowers (MIT; adapted cross-refs and examples to this repo, scripts not copied). CLAUDE.md: rules 6-7 and "Compact instructions" (official Claude Code guidance); utar-verify description in third person per skill-authoring guide | .claude/skills/systematic-debugging/*, .claude/skills/verification-before-completion/*, .claude/skills/utar-verify/SKILL.md, CLAUDE.md, docs/KNOWLEDGE.md |
 | `039acdc` | 2026-11-13 | Skill `utar-verify` (test/build/verify routine). Mock runs: Playwright saves a screenshot + sanitised HTML of **every page it visits** whenever `UTAR_BASE_URL` is set (always on for the mock, even without `debug_dumps`); `UTAR_DEBUG_DIR` overrides the folder. E2E: each case gets `screenshots/<case>-app/` with the app browser's pages, linked in report.md. Unit/stress tests send captures to a temp dir. Change log converted to this commit table. | src/utils/diagnostics.py, src/scrapers/playwright_scraper.py, tests/e2e/run_e2e.py, tests/test_issue_fixes.py, tests/test_plan_runner.py, tests/stress/run_stress.py, .claude/skills/utar-verify/SKILL.md, CLAUDE.md, docs/KNOWLEDGE.md |
 | `4339c08` | 2026-11-13 | `build_exe.py` keeps the user's dist `data/`, `logs/`, `config.ini` across rebuilds (copy in build/keep-user-files); run 2 report | build_exe.py, docs/run-report.md |
 | `b2375b7` | 2026-11-13 | Playwright `save_page()` (screenshot + HTML) on debug for failed/refused logins, registered page, submit results; dumps mask student ID and `passid`; one shared OCR model, warmed up at app start | src/utils/diagnostics.py, src/utils/captcha_solver.py, src/web_backend.py |

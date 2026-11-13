@@ -1,6 +1,6 @@
 ---
 name: utar-verify
-description: Verify a change in this repo the proven way, first try. Covers unit tests, the E2E UI run against the mock portal, a mock portal by hand, the exe build (incl. when VS Code locks dist) and the --test-real-server check. Use after any code change here, before committing, or when asked to test, build or check the app.
+description: Runs and checks this repo's tests and builds the proven way - unit tests, the E2E UI run against the mock UTAR portal, a mock portal by hand, the PyInstaller exe build (including when VS Code locks dist) and the --test-real-server check. Use after any code change here, before committing, or when asked to test, build, verify or check the app.
 ---
 
 # Verify a change (UTAR course bidding app)
