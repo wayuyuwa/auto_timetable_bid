@@ -86,11 +86,34 @@ def build_executable():
     print("Building executable with PyInstaller...")
     print("Command:", " ".join(cmd))
     
+    # PyInstaller --noconfirm deletes dist/UnitRegTimetable. Keep the user's
+    # saved plans/login (data/), their edited config.ini and their logs.
+    app_dir = os.path.join(cur_dir, "dist", "UnitRegTimetable")
+    keep_dir = os.path.join(cur_dir, "build", "keep-user-files")
+    shutil.rmtree(keep_dir, ignore_errors=True)
+    kept = []
+    for name in ("data", "logs", "config.ini"):
+        source = os.path.join(app_dir, name)
+        if os.path.exists(source):
+            os.makedirs(keep_dir, exist_ok=True)
+            target = os.path.join(keep_dir, name)
+            (shutil.copytree if os.path.isdir(source) else shutil.copy2)(source, target)
+            kept.append(name)
+
     # Run PyInstaller
     try:
         subprocess.check_call(cmd)
-        # The app reads config.ini next to the exe (portal URLs, logging).
-        shutil.copy2(os.path.join(cur_dir, "config.ini"), os.path.join(cur_dir, "dist", "UnitRegTimetable", "config.ini"))
+        for name in kept:
+            source, target = os.path.join(keep_dir, name), os.path.join(app_dir, name)
+            if os.path.isdir(source):
+                shutil.copytree(source, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(source, target)
+        if "config.ini" not in kept:
+            # The app reads config.ini next to the exe (portal URLs, logging).
+            shutil.copy2(os.path.join(cur_dir, "config.ini"), os.path.join(app_dir, "config.ini"))
+        if kept:
+            print(f"\nKept your {', '.join(kept)} from the previous build (copy in {keep_dir}).")
         print("\nBuild successful!")
         print("\nApp folder: dist/UnitRegTimetable (run UnitRegTimetable.exe inside it;")
         print("distribute the whole folder, not only the exe).")
@@ -100,6 +123,8 @@ def build_executable():
         print("\nSize report: python tools/bundle_size.py")
     except subprocess.CalledProcessError as e:
         print(f"Build failed with error: {e}")
+        if kept:
+            print(f"Your {', '.join(kept)} are saved in {keep_dir}.")
         return False
     
     return True

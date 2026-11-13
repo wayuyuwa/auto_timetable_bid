@@ -286,3 +286,42 @@ venv\Scripts\python build_exe.py
 - Task 16: whether an early session still works once the window opens, and what the portal shows before opening, can only be confirmed on the live portal. The app's behaviour is safe either way.
 - `README.zh.md` is still not updated.
 - Group switching is still not automated; it needs a capture of `changeClass.jsp`.
+
+---
+
+# Run 2: exe logs and updated issues.txt (2026-11-13, 15:10)
+
+The input was `dist\UnitRegTimetable\logs` (scraper.log, error.log, real-server-test.txt, debug/) from your pre-flights between 13:58 and 14:03, plus the updated `issues.txt`. No personal data from the logs is repeated here.
+
+## What the logs showed
+
+| # | Problem in the logs | Cause | Status |
+|---|---|---|---|
+| L1 | BeautifulSoup pre-flights: "Login accepted, then the portal answered session expired" twice, reported as "registration may be closed" | The debug dumps show the portal did not expire the session. After the password was accepted it redirected to `login.jsp?message=notActive` ("Your study status is not allowed to access this system, please check with faculty officer") or `message=notConsultAdviser`. That means UTAR refused the account. The scraper ignored the redirect, so the next page said "session expired". | Done + tested. New `AccountNotAllowed` error: shown at once with UTAR's own red text, no retries, never called "portal closed". A scheduled start does not keep retrying it either. |
+| L2 | Playwright pre-flights: "The portal did not answer within 3s", 3 times | Same refusal. The browser landed on the login page with the red message, but the login only waited for "Log Out" or "Invalid", so it ran out the full wait (3 s in your exe `config.ini`) three times. | Done + tested. The Playwright login now watches for `login.jsp?message=<code>` and stops on the first attempt. |
+| L3 | A pre-flight at 14:01:36 stopped after the captcha with nothing in the log | The portal answered "Invalid Student ID or Password" (`message=loginError`). The app handled it correctly but never logged it. | Done. Every login error is now written to `scraper.log` with its kind. |
+| L4 | Debug dumps contained the `passid=` login token from the redirect URL and the student ID in the form | Masking covered only the password, captcha, cookies and jsessionid | Done + tested. `passid` and the student ID (`reqFregkey`) are now masked too. |
+| L5 | The first Playwright captcha took up to 14 s on a busy PC | Each scraper loaded the 13 MB OCR model again (about 1.5 s, plus about 3 s for the first import) | Done + tested. One shared model per app, loaded in the background at startup. |
+| L6 | `error.log` is empty and `real-server-test.txt` is from the 04:04 mock check | Nothing to fix | None |
+
+**What this means for you.** These pre-flights did not fail because registration is closed or because of the app. UTAR's login refused the account with its own message: study status not allowed, and in later attempts "notConsultAdviser". That has to be sorted out with UTAR (faculty officer or academic adviser). The app now says so plainly in the Login & settings panel.
+
+## issues.txt (updated)
+
+| Item | Status |
+|---|---|
+| "For playwright allow save the web html too (if possible) on debug" | Done + tested. With `debug_dumps = true`, the Playwright scraper saves a screenshot **and** the sanitised page HTML (`.html`, with the URL in a header comment) to `logs/debug/`. This happens for every failed or refused login attempt, the registered-courses page, and the result page after each submit. Test: `DebugPageTests`. |
+
+## Tests
+
+| Suite | Result |
+|---|---|
+| Unit: `test_issue_fixes`, `test_plan_runner`, `test_mock_server`, `test_utar_html_parser` | 56/56 OK. New: 5 refused-account tests (both methods, both codes, scheduled start), the debug HTML test, extended sanitizer checks |
+| E2E: `tests/e2e/run_e2e.py` | 53/53 passed (new: `login_03_account_refused`) |
+
+New mock scenarios `not-active` and `not-adviser` copy the portal's redirect. The `notConsultAdviser` page wording in the mock is a stand-in, because your logs had only the code. The app shows whatever red text the real portal returns.
+
+## Not done
+
+- The exe was not rebuilt, because the updated issues.txt does not ask for a packaged-app check. To get these fixes in the exe, run `venv\Scripts\python build_exe.py`. Close any VS Code window with the dist folder open first, or the clean step fails.
+- Related fix found while writing this: a rebuild used to wipe `dist\UnitRegTimetable` including your `data\app.db`, and since run 1 it also overwrote your edited `config.ini`. `build_exe.py` now keeps `data\`, `logs\` and `config.ini` (a copy stays in `build\keep-user-files`) and restores them after the build. I tested this with a simulated build in a temp folder; your dist folder was not touched.
