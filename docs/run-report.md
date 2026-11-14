@@ -325,3 +325,23 @@ New mock scenarios `not-active` and `not-adviser` copy the portal's redirect. Th
 
 - The exe was not rebuilt, because the updated issues.txt does not ask for a packaged-app check. To get these fixes in the exe, run `venv\Scripts\python build_exe.py`. Close any VS Code window with the dist folder open first, or the clean step fails.
 - Related fix found while writing this: a rebuild used to wipe `dist\UnitRegTimetable` including your `data\app.db`, and since run 1 it also overwrote your edited `config.ini`. `build_exe.py` now keeps `data\`, `logs\` and `config.ini` (a copy stays in `build\keep-user-files`) and restores them after the build. I tested this with a simulated build in a temp folder; your dist folder was not touched.
+
+---
+
+# Exe rebuild (2026-11-14)
+
+Built from `develop` at `6424c57`, which includes the refused-account detection, Playwright page captures, the shared OCR model and the build fixes.
+
+- `build_exe.py` stopped again on the VS Code lock (`_internal\vcruntime140.dll`). Its new safety step had already saved your `data`, `logs` and `config.ini` to `build\keep-user-files`. I built into a temp folder, copied 242 changed files (33 identical, 1 stale removed) and restored your files. Your `config.ini` and `app.db` are byte-identical to before.
+- Size: 223.6 MB including your logs and debug files.
+- Exe checks against the mock:
+
+| Check | Result |
+|---|---|
+| `--test-real-server`, method bs, success | exit 0 |
+| `--test-real-server`, method playwright, success | exit 0, page captures written (5 screenshots, 5 HTML) |
+| `--test-real-server`, method bs, `not-active` | exit 1 in 2 s: "UTAR refused this account: ...study status is not allowed..." (attempt 1/5, no retries) |
+| `--test-real-server`, method playwright, `not-active` | exit 1 in 5 s: same message (attempt 1/3) |
+| GUI launch | window "UTAR Course Bidding", responding, closed normally; error.log still empty |
+
+Your `logs/real-server-test.txt` was restored after the checks, and the check captures went to a temp folder.
