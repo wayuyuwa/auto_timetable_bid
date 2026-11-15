@@ -3,7 +3,7 @@
 Living map of this repo so any person or agent can find what to edit quickly.
 **Rule: whenever code, config, tests or behaviour change, update this file in the same commit** (map, "where to edit", flows and the change log at the bottom). Every change-log row names its commit hash and files.
 
-Last updated: 2026-11-13 (issues.txt overnight run).
+Last updated: 2026-11-15 (GitHub release workflow).
 
 ## What the app is
 
@@ -21,12 +21,14 @@ UTAR course-registration bidding desktop app.
 main.py                         Entry point: src.web_backend.run(); `--test-real-server` runs src/real_server_test.py
 main2.py                        Standalone OCR timing demo (not used by the app)
 build_exe.py / build.bat        PyInstaller onedir build; bundles web/dist + OCR model files only (not all of src/);
-                                keeps the user's dist data/, logs/ and config.ini across rebuilds (build/keep-user-files)
+                                keeps the user's dist data/, logs/ and config.ini across rebuilds (build/keep-user-files);
+                                exits 1 when the build fails (build.bat and the workflow rely on it)
 tools/bundle_size.py            Size report of dist/UnitRegTimetable (largest folders/files)
 config.ini                      Portal URLs, headers, Playwright waits, [Storage] db path,
                                 [Logging] level (env UTAR_LOG_LEVEL overrides) and debug_dumps (env UTAR_DEBUG_DUMPS)
 requirements.txt                Python deps (PyQt5 only for the legacy GUI)
-.github/workflows/build-and-release.yml   Windows build on v* tags
+.github/workflows/build-and-release.yml   Windows build -> UnitRegTimetable.zip -> GitHub Release (permanent).
+                                Runs on v* tags and on manual "Run workflow" (see "Releases" under Key flows)
 .claude/settings.json           {"worktree":{"bgIsolation":"none"}} - agents edit in place
 .claude/skills/utar-verify/     Skill: how to test/build/verify (commands, pitfalls, pre-commit checklist)
 .claude/skills/systematic-debugging/, verification-before-completion/
@@ -133,6 +135,7 @@ Not tracked / ignore: `src-tauri/` (leftover from the `tauri-rust` branch), `dis
 | Timetable .txt import format                       | `src/utils/timetable_reader.py`; JSON import in `DesktopApi.import_courses` |
 | Mock portal behaviour / new test scenario          | `src/mock_server.py` (+ `tests/test_mock_server.py`)        |
 | Exe packaging                                      | `build_exe.py`                                              |
+| GitHub build, zip contents, release naming/triggers | `.github/workflows/build-and-release.yml`                  |
 | Window title / size                                | `run()` in `src/web_backend.py`                             |
 | App icon                                           | `resources/icon.ico`                                        |
 
@@ -153,6 +156,12 @@ Not tracked / ignore: `src-tauri/` (leftover from the `tauri-rust` branch), `dis
 **Packaged exe and Playwright:** Playwright sets PLAYWRIGHT_BROWSERS_PATH=0 when frozen (looks inside the bundle). `browser_setup.configure_browsers_path()` points it at `%LOCALAPPDATA%\ms-playwright` instead; missing Chromium → BrowserMissing with an "Install browser" button (runs the bundled driver's `install chromium`).
 
 **Stop:** `DesktopApi.cancel()` → runner cancel → scraper cancel; watchdog marks the run cancelled after `STOP_GRACE_SECONDS` (25 s) if the worker hangs. BS cancel floor ~10 s is deliberate (avoid double-submitting a bid).
+
+**Releases (GitHub workflow):** job `build` (windows-latest, Python 3.10, Node 22) runs `build_exe.py`, fails if `dist\UnitRegTimetable\UnitRegTimetable.exe` is missing, zips the app folder + `config.ini` + `resources\` into `UnitRegTimetable.zip` and hands it to job `release` as an Actions artifact. That artifact is only a hand-over: GitHub deletes artifacts after the repo's retention period (90 days at most on a public repo), so it is not the permanent copy. Job `release` attaches the zip to a GitHub Release, which never expires.
+- Push of a `v*` tag → release named `UnitRegTimetable <tag>` on that tag; pre-release when the tag ends in `beta`.
+- Manual "Run workflow" on a branch → pre-release with the new tag `build-<run number>` on the built commit (owner's choice 2026-11-15: tags + manual runs, no release on ordinary pushes). Re-running the same run reuses its run number, so it updates that release.
+- The version is whatever tag name is pushed; nothing is numbered automatically except `build-<run number>`.
+- Not verifiable from this machine (no `gh` CLI): the workflow cannot be run locally, so a change is only proven by a real run on GitHub.
 
 ## Conventions and owner rules
 
@@ -198,6 +207,7 @@ hash is filled in by the next commit. Run `git log --oneline` for anything missi
 
 | Commit | Date | What changed | Files |
 |---|---|---|---|
+| (pending) | 2026-11-15 | GitHub workflow: manual runs now also publish a permanent pre-release `build-<run number>` (before: only `v*` tags released; manual runs left an expiring artifact). Fails early when the exe or zip is missing; artifact holds only the zip; Node 22 set up explicitly; actions updated (checkout v4, setup-python v5, action-gh-release v2). `build_exe.py` exits 1 on a failed build (it always exited 0). README "Building and releases". Checked locally: YAML parse, packaging step dry run on a fake dist, unit tests; not run on GitHub yet | .github/workflows/build-and-release.yml, build_exe.py, README.md, docs/KNOWLEDGE.md |
 | `673e911` | 2026-11-14 | Exe rebuilt from `6424c57` (temp build + copy, VS Code lock); checked with --test-real-server on the mock (bs/playwright, success and not-active) and a GUI launch; results in docs/run-report.md | docs/run-report.md, docs/KNOWLEDGE.md |
 | `c1d5dd1` | 2026-11-13 | Adopted proven public skills after reading them: `systematic-debugging` (+ `root-cause-tracing.md`) and `verification-before-completion` from obra/superpowers (MIT; adapted cross-refs and examples to this repo, scripts not copied). CLAUDE.md: rules 6-7 and "Compact instructions" (official Claude Code guidance); utar-verify description in third person per skill-authoring guide | .claude/skills/systematic-debugging/*, .claude/skills/verification-before-completion/*, .claude/skills/utar-verify/SKILL.md, CLAUDE.md, docs/KNOWLEDGE.md |
 | `039acdc` | 2026-11-13 | Skill `utar-verify` (test/build/verify routine). Mock runs: Playwright saves a screenshot + sanitised HTML of **every page it visits** whenever `UTAR_BASE_URL` is set (always on for the mock, even without `debug_dumps`); `UTAR_DEBUG_DIR` overrides the folder. E2E: each case gets `screenshots/<case>-app/` with the app browser's pages, linked in report.md. Unit/stress tests send captures to a temp dir. Change log converted to this commit table. | src/utils/diagnostics.py, src/scrapers/playwright_scraper.py, tests/e2e/run_e2e.py, tests/test_issue_fixes.py, tests/test_plan_runner.py, tests/stress/run_stress.py, .claude/skills/utar-verify/SKILL.md, CLAUDE.md, docs/KNOWLEDGE.md |

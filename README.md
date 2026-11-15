@@ -207,6 +207,22 @@ library (~20 MB) and the captcha model (13 MB). Chromium itself is not bundled
 (it would add ~300 MB); it is installed once per user. Run
 `python tools/bundle_size.py` after a build to see the breakdown.
 
+## Building and releases
+
+Local build: `python build_exe.py` (or `build.bat`) creates
+`dist\UnitRegTimetable\`. The script exits with code 1 when the build fails.
+
+GitHub builds (`.github/workflows/build-and-release.yml`) produce
+`UnitRegTimetable.zip` and attach it to a GitHub Release. Release files never
+expire, so every build stays downloadable from the repository's Releases page.
+
+| How it starts | Result |
+|---|---|
+| Push a tag that starts with `v`, e.g. `git tag v1.4.0` then `git push origin v1.4.0` | Release "UnitRegTimetable v1.4.0" (marked pre-release when the tag ends in `beta`) |
+| Actions tab → "Build and Release" → "Run workflow" (pick a branch) | Pre-release tagged `build-<run number>`, built from that branch |
+
+The version is the tag name you choose; each tag keeps its own release and zip.
+
 ## Project Structure
 
 ```

@@ -130,4 +130,5 @@ def build_executable():
     return True
 
 if __name__ == "__main__":
-    build_executable()
+    # Non-zero exit on failure so build.bat and the GitHub workflow stop.
+    sys.exit(0 if build_executable() else 1)
