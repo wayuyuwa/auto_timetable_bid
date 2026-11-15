@@ -2,27 +2,40 @@
 BeautifulSoup implementation for scraping UTAR course registration data.
 """
 
+import re
 import requests
 from bs4 import BeautifulSoup
 import urllib3
 import socket
+import os
 from time import sleep
-from threading import Event, Lock
+from threading import Event, Lock, RLock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from ..utils.config import (
     BASE_URL, LOGIN_URL, LOGIN_PROCESS_URL, REGISTRATION_URL,
-    COURSE_REGISTRATION_URL, DEFAULT_HEADERS
+    HOME_URL, COURSE_REGISTRATION_URL, REGISTER_UNIT_PRO_URL, DEFAULT_HEADERS
 )
 from ..utils.captcha_solver import CaptchaSolver
 from ..utils.logger import setup_logger
-from ..utils.timetable_reader import Course
+from ..models.course import Course
+from ..utils.diagnostics import dump_http
+from .errors import InvalidCredentials, LoginError, PortalClosed, PortalUnavailable, portal_rejection
+from .html_parser import (
+    find_course_value,
+    parse_home_page,
+    parse_registered_courses,
+    parse_unit_slots,
+)
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configure logging
 logger = setup_logger(__name__)
+
+LOGIN_MESSAGE_REDIRECT = re.compile(r"login\.jsp\?message=([A-Za-z]+)")
+
 
 class SessionExpiredException(Exception):
     """Exception raised when the session has expired."""
@@ -41,27 +54,13 @@ class BeautifulSoupScraper:
             pool_connections (int): Number of connection pools
             pool_maxsize (int): Maximum connections per pool
         """
-        # Configure session with retry strategy
-        self.session = requests.Session()
-        
-        # Configure retry strategy
-        retry_strategy = Retry(
-            total=connection_retries,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"]
-        )
-        
-        # Mount adapter with retry strategy
-        adapter = HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=pool_connections,
-            pool_maxsize=pool_maxsize
-        )
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
-        
+        self._connection_retries = connection_retries
+        self._pool_connections = pool_connections
+        self._pool_maxsize = pool_maxsize
+        self.session = self._new_session()
+
         self.headers = DEFAULT_HEADERS
+        self.connection_timeout = connection_timeout
         self.captcha_solver = CaptchaSolver()
         self.max_retries = 2
         
@@ -72,9 +71,41 @@ class BeautifulSoupScraper:
         self._student_id = None
         self._password = None
         self._is_logged_in = False
-        self._relogin_lock = Lock()  # Lock to prevent multiple relogin attempts
+        self._relogin_lock = RLock()  # Lock to prevent multiple relogin attempts
+        self._relogin_active = False  # True while a relogin is running
+        self._logging_in = False  # True inside login(); disables nested relogin
+        self._home_data = None
+        self.on_login_progress = None  # optional callback(attempt, max, previous_reason)
         
         logger.info("BeautifulSoupScraper initialized")
+
+    def _new_session(self):
+        """Build the HTTP session.
+
+        read=0: do NOT retry read timeouts at the adapter level. A hanging
+        request otherwise blocks ~connection_retries x connection_timeout
+        (~40s) before the cancellation check runs, so "Stop safely" feels
+        unresponsive. Connection-drop retries are kept for resilience, and
+        register_courses() has its own cancellation-aware retry loop.
+        """
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=self._connection_retries,
+            connect=self._connection_retries,
+            read=0,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"],
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=self._pool_connections,
+            pool_maxsize=self._pool_maxsize,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
 
     def cancel(self):
         """Set the cancellation token to stop ongoing operations."""
@@ -85,6 +116,14 @@ class BeautifulSoupScraper:
         """Reset the cancellation token."""
         self._cancellation_token.clear()
         logger.info("Cancellation token reset")
+
+    def is_cancelled(self) -> bool:
+        """Return True when cancellation has been requested."""
+        return self._cancellation_token.is_set()
+
+    def is_logged_in(self) -> bool:
+        """Return True after a successful login."""
+        return self._is_logged_in
 
     def _check_cancellation(self):
         """Check if operation has been cancelled and raise exception if needed."""
@@ -124,32 +163,27 @@ class BeautifulSoupScraper:
             
         # Prevent multiple simultaneous relogin attempts
         with self._relogin_lock:
+            if self._relogin_active:
+                # login() itself hit "session expired" (for example when
+                # registration is closed). Starting another relogin from inside
+                # a relogin used to deadlock on this lock; give up instead.
+                logger.warning("Session expired again during relogin; not retrying")
+                return False
             if self._is_logged_in:
                 # Another thread already relogged in successfully
                 return True
-                
+
             logger.info("Attempting to relogin due to session expiration")
+            self._relogin_active = True
             try:
+                self._check_cancellation()
                 # Clear the session and create a new one
                 self.session.close()
-                self.session = requests.Session()
-                
-                # Configure retry strategy again
-                retry_strategy = Retry(
-                    total=3,
-                    backoff_factor=0.5,
-                    status_forcelist=[429, 500, 502, 503, 504],
-                    allowed_methods=["GET", "POST"]
-                )
-                
-                # Mount adapter with retry strategy
-                adapter = HTTPAdapter(max_retries=retry_strategy)
-                self.session.mount("http://", adapter)
-                self.session.mount("https://", adapter)
-                
+                self.session = self._new_session()
+
                 # Attempt login with stored credentials
-                login_result = self.login(self._student_id, self._password)
-                
+                login_result = self.login(self._student_id, self._password, max_retries=1)
+
                 if 'success' in login_result:
                     self._is_logged_in = True
                     logger.info("Successfully relogged in after session expiration")
@@ -157,10 +191,12 @@ class BeautifulSoupScraper:
                 else:
                     logger.error("Failed to relogin after session expiration")
                     return False
-                    
+
             except Exception as e:
                 logger.error(f"Error during relogin attempt: {str(e)}")
                 return False
+            finally:
+                self._relogin_active = False
 
     async def fetch_student_info(self, unit_code: str, group_code: str) -> dict:
         """
@@ -185,7 +221,8 @@ class BeautifulSoupScraper:
                 REGISTRATION_URL,
                 headers=self.headers,
                 data=data,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -256,7 +293,8 @@ class BeautifulSoupScraper:
                 REGISTRATION_URL,
                 headers=self.headers,
                 data=data,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -296,187 +334,167 @@ class BeautifulSoupScraper:
             # If we get here, it was another exception
             raise Exception(f'Request failed: {str(e)}')
     
-    def login(self, student_id: str, password: str, max_retries: int = 5) -> dict:
+    # Consecutive "login accepted, then session expired" answers after which the
+    # portal is treated as closed (registration not open) instead of retrying on.
+    CLOSED_AFTER = 2
+
+    def _wait(self, seconds: float):
+        """Pause between attempts; returns early (and raises) on cancel."""
+        if self._cancellation_token.wait(seconds):
+            self._check_cancellation()
+
+    def login(self, student_id: str, password: str, max_retries: int = 5, progress=None) -> dict:
         """
-        Handle the login process including CAPTCHA.
-        
-        Args:
-            student_id (str): Student ID for login
-            password (str): Password for login
-            max_retries (int): Maximum number of retry attempts
-            
-        Returns:
-            dict: Dictionary containing login result and student data
-            
-        Raises:
-            Exception: Only for critical issues like invalid credentials or missing required data
+        Log in, solving the CAPTCHA. Retries wrong captchas and transient errors.
+
+        progress(attempt, max_attempts, previous_failure_reason_or_None) is called
+        before each attempt so the UI can show "Login attempt 2/5".
+
+        Raises InvalidCredentials, PortalClosed or PortalUnavailable (all
+        LoginError) with the per-attempt reasons in .attempts.
         """
-        # Critical validation
         if not student_id or not password:
-            raise Exception("Student ID and password are required!")
+            raise InvalidCredentials("Student ID and password are required.")
 
         # Store credentials for potential relogin
         self._student_id = student_id
         self._password = password
         self._is_logged_in = False
-        
-        retry_count = 0
-        while retry_count < max_retries:
-            try:
-                self._check_cancellation()
-                
-                # Get login page
-                logger.info(f"Attempting to get login page (attempt {retry_count+1}/{max_retries})")
-                response = self.session.get(LOGIN_URL, headers=self.headers, verify=False)
-                
-                self._check_cancellation()
-                
-                if response.status_code != 200:
-                    logger.warning(f"Failed to get login page. Status: {response.status_code}")
-                    retry_count += 1
-                    sleep(1)
-                    continue
+        progress = progress or self.on_login_progress
 
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Find CAPTCHA image
-                captcha_img = soup.find('img', {'src': lambda src: src and 'Kaptcha.jpg' in src})
-                if not captcha_img:
-                    logger.warning("CAPTCHA image not found, retrying...")
-                    retry_count += 1
-                    sleep(1)
-                    continue
-                
-                # Get CAPTCHA image
-                captcha_src = captcha_img['src'].lstrip('../')
-                captcha_url = f"{BASE_URL}/../{captcha_src}"
-                
+        reasons = []
+        closed_streak = 0
+        self._logging_in = True
+        try:
+            for attempt in range(1, max_retries + 1):
                 self._check_cancellation()
-                
-                try:
-                    logger.info(f"Attempting to retrieve CAPTCHA image")
-                    captcha_response = self.session.get(captcha_url, headers=self.headers, verify=False)
-                    
-                    self._check_cancellation()
-                    
-                    if captcha_response.status_code != 200:
-                        logger.warning(f"Failed to retrieve CAPTCHA image from {captcha_url}. Status: {captcha_response.status_code}")
-                        retry_count += 1
-                        sleep(1)
-                        continue
-                    
-                    # Solve CAPTCHA using CaptchaSolver
+                if progress:
                     try:
-                        self._check_cancellation()
-                        captcha_solution = self.captcha_solver.solve(captcha_response.content)
-                        logger.info(f'CAPTCHA solved: {captcha_solution}')
-                    except ConnectionError as ce:
-                        logger.warning(f"Connection error during CAPTCHA solving: {str(ce)}")
-                        retry_count += 1
-                        sleep(2)  # Slightly longer sleep for connection issues
-                        continue
-                
-                except (requests.RequestException, socket.error) as e:
-                    self._check_cancellation()
-                    logger.warning(f"Network error retrieving CAPTCHA: {str(e)}")
-                    retry_count += 1
-                    sleep(2)
-                    continue
-                
-                self._check_cancellation()
-                
-                # Get preKap value
-                prekap_input = soup.find('input', {'name': 'preKap'})
-                if not prekap_input:
-                    logger.warning("preKap value not found, retrying...")
-                    retry_count += 1
-                    sleep(1)
-                    continue
-                
-                prekap_value = prekap_input.get('value')
-                
-                # Attempt login
-                payload = {
-                    'preKap': prekap_value,
-                    'reqFregkey': student_id,
-                    'reqPassword': password,
-                    'kaptchafield': captcha_solution
-                }
-                
-                self._check_cancellation()
-                
-                login_response = self.session.post(
-                    LOGIN_PROCESS_URL,
-                    headers=self.headers,
-                    data=payload,
-                    verify=False
-                )
+                        progress(attempt, max_retries, reasons[-1] if reasons else None)
+                    except Exception:  # noqa: BLE001 - a UI callback must not break login
+                        pass
+                reason, closed = self._login_once(student_id, password, attempt, max_retries)
+                if reason is None:
+                    self._is_logged_in = True
+                    return {"success": "Login successful", "students_data": self._home_data}
+                reasons.append(reason)
+                logger.warning("Login attempt %s/%s failed: %s", attempt, max_retries, reason)
+                closed_streak = closed_streak + 1 if closed else 0
+                if closed_streak >= self.CLOSED_AFTER:
+                    break  # the portal answers consistently; more attempts only waste time
+                if attempt < max_retries:
+                    # Wrong captcha: retry at once. Anything else: short back-off.
+                    self._wait(0 if reason == "Wrong captcha" else min(1.0 * attempt, 3.0))
+        finally:
+            self._logging_in = False
 
-                try:
-                    self._check_session_expired(login_response)
-                except SessionExpiredException:
-                    # If we get a session expired during login, that's unexpected but we should retry
-                    logger.warning("Received session expired during login attempt, retrying...")
-                    retry_count += 1
-                    sleep(1)
-                    continue
-                
-                self._check_cancellation()
-                
-                if 'Invalid code' in login_response.text:
-                    # This is a critical error - invalid credentials
-                    logger.error("Invalid CAPTCHA code entered. Retrying...")
-                    retry_count += 1
-                    continue
-                elif 'Invalid' in login_response.text:
-                    # This is a critical error - invalid credentials
-                    self._is_logged_in = False
-                    raise Exception('Login failed. Please check your credentials.')
-                
-                # Get home page data
-                home_data = self.get_home_page_data()
-                if not home_data:
-                    logger.warning("Failed to get home page data, retrying...")
-                    retry_count += 1
-                    sleep(1)
-                    continue
-                
-                # Set logged in flag
-                self._is_logged_in = True
-                
-                return {
-                    'success': 'Login successful',
-                    'students_data': home_data
-                }
-                
-            except SessionExpiredException:
-                logger.warning("Session expired during login, retrying...")
-                retry_count += 1
-                sleep(1)
-                continue
-            except requests.RequestException as e:
-                logger.warning(f"Request failed: {str(e)}, retrying...")
-                retry_count += 1
-                sleep(1)
-                continue
-            except Exception as e:
-                # Check if it was a cancellation
-                self._check_cancellation()
-                
-                # If we get here, it wasn't a cancellation
-                if "check your credentials" in str(e):
-                    # Re-raise critical errors
-                    self._is_logged_in = False
-                    raise
-                
-                logger.warning(f"Login attempt failed: {str(e)}, retrying...")
-                retry_count += 1
-                sleep(1)
-                continue
-        
-        # If we've exhausted all retries
         self._is_logged_in = False
-        raise Exception(f"Login failed after {max_retries} attempts. Please try again later.")
+        self._check_cancellation()
+        summary = "; ".join(f"{index}: {text}" for index, text in enumerate(reasons, 1))
+        if closed_streak >= self.CLOSED_AFTER or (reasons and all("session expired" in r for r in reasons)):
+            raise PortalClosed(
+                f"Login failed after {len(reasons)} attempt(s). The portal accepted the login but "
+                "then answered 'session expired'; course registration may be closed right now. "
+                f"({summary})",
+                reasons,
+            )
+        raise PortalUnavailable(f"Login failed after {len(reasons)} attempt(s). ({summary})", reasons)
+
+    def _portal_message(self, code: str) -> str:
+        """Red message text the portal shows on login.jsp?message=<code>."""
+        try:
+            response = self.session.get(f"{LOGIN_URL}?message={code}", headers=self.headers, verify=False,
+                                        timeout=self.connection_timeout)
+            dump_http(f"login-message-{code}", response)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for element in soup.select('.red'):
+                text = " ".join(element.get_text(" ").split())
+                if text:
+                    return text
+        except requests.RequestException as error:
+            logger.debug("Could not read the portal message for %s: %s", code, error)
+        return ""
+
+    def _login_once(self, student_id, password, attempt, max_retries):
+        """One login attempt. Returns (None, False) on success, else
+        (reason, looks_closed). Raises InvalidCredentials or on cancellation."""
+        try:
+            logger.info("Login attempt %s/%s: loading login page", attempt, max_retries)
+            response = self.session.get(LOGIN_URL, headers=self.headers, verify=False,
+                                        timeout=self.connection_timeout)
+            dump_http("login-page", response)
+            self._check_cancellation()
+            if response.status_code != 200:
+                return f"Login page returned HTTP {response.status_code}", False
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            captcha_img = soup.find('img', {'src': lambda src: src and 'Kaptcha.jpg' in src})
+            prekap_input = soup.find('input', {'name': 'preKap'})
+            if not captcha_img or not prekap_input:
+                return "Login page did not contain the captcha form", False
+
+            captcha_src = captcha_img['src'].lstrip('../')
+            captcha_url = f"{BASE_URL}/../{captcha_src}"
+            captcha_response = self.session.get(captcha_url, headers=self.headers, verify=False,
+                                                timeout=self.connection_timeout)
+            self._check_cancellation()
+            if captcha_response.status_code != 200:
+                return f"Captcha image returned HTTP {captcha_response.status_code}", False
+            captcha_solution = os.getenv("UTAR_MOCK_CAPTCHA") or self.captcha_solver.solve(captcha_response.content)
+            logger.info("Captcha solved: %s", captcha_solution)
+
+            payload = {
+                'preKap': prekap_input.get('value'),
+                'reqFregkey': student_id,
+                'reqPassword': password,
+                'kaptchafield': captcha_solution,
+            }
+            self._check_cancellation()
+            login_response = self.session.post(LOGIN_PROCESS_URL, headers=self.headers, data=payload,
+                                               verify=False, timeout=self.connection_timeout)
+            dump_http("login-submit", login_response, payload)
+            self._check_cancellation()
+            try:
+                self._check_session_expired(login_response)
+            except SessionExpiredException:
+                return "Portal answered session expired at login", True
+
+            if 'Invalid code' in login_response.text:
+                return "Wrong captcha", False
+            # The portal refuses some logins by sending the browser back to
+            # login.jsp?message=<code> (seen: loginError, notActive, notConsultAdviser).
+            redirect = LOGIN_MESSAGE_REDIRECT.search(login_response.text)
+            if redirect:
+                code = redirect.group(1)
+                text = self._portal_message(code)
+                rejection = portal_rejection(code, text)
+                if rejection is not None:
+                    raise rejection
+                return f"Portal sent the login back ({code}): {text or 'no message'}", False
+            if 'Invalid' in login_response.text:
+                self._is_logged_in = False
+                raise InvalidCredentials("Login failed: the portal rejected the student ID or password. "
+                                         "Please check your credentials.")
+
+            try:
+                home_data = self.get_home_page_data()
+            except SessionExpiredException:
+                return "Login accepted, then the portal answered session expired", True
+            if not home_data or not home_data[0]:
+                return "Logged in, but the registration page could not be read", False
+            self._home_data = home_data
+            return None, False
+        except LoginError:
+            raise
+        except requests.Timeout:
+            self._check_cancellation()
+            return f"No response within {self.connection_timeout}s", False
+        except (requests.RequestException, socket.error) as error:
+            self._check_cancellation()
+            return f"Network error: {type(error).__name__}", False
+        except Exception as error:  # noqa: BLE001
+            self._check_cancellation()
+            return str(error) or type(error).__name__, False
 
     def get_home_page_data(self) -> tuple:
         """
@@ -488,34 +506,24 @@ class BeautifulSoupScraper:
         try:
             self._check_cancellation()
             
-            response = self.session.get(COURSE_REGISTRATION_URL, headers=self.headers, verify=False)
+            response = self.session.get(
+                COURSE_REGISTRATION_URL,
+                headers=self.headers,
+                verify=False,
+                timeout=self.connection_timeout,
+            )
             
+            dump_http("registration-page", response)
             self._check_session_expired(response)
             
             if response.status_code != 200:
                 logger.info(f'Failed to retrieve home page. Status code: {response.status_code}')
                 return None, self.session.cookies.get_dict()
             
-            soup = BeautifulSoup(response.content, 'html.parser')
-            table = soup.find('table', {'id': 'tblGrid'})
-            
-            if not table:
+            data = parse_home_page(response.content.decode('utf-8', errors='ignore'))
+            if not data:
                 logger.info('Table not found.')
                 return None, self.session.cookies.get_dict()
-            
-            data = {}
-            rows = table.find_all('tr', align='left')
-            
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) >= 2:
-                    key = cols[0].get_text(strip=True)
-                    if len(cols) == 4:
-                        data[key] = cols[1].get_text(strip=True)
-                        second_key = cols[2].get_text(strip=True)
-                        data[second_key] = cols[3].get_text(strip=True)
-                    else:
-                        data[key] = cols[1].get_text(strip=True)
             
             logger.info('Extracted Data:')
             for key, value in data.items():
@@ -524,6 +532,8 @@ class BeautifulSoupScraper:
             return data, self.session.cookies.get_dict()
             
         except SessionExpiredException:
+            if self._logging_in:
+                raise  # login() decides what to do; never a nested relogin
             # Try to relogin and retry the operation
             if self._try_relogin():
                 logger.info("Retrying get_home_page_data after successful relogin")
@@ -660,7 +670,12 @@ class BeautifulSoupScraper:
                 result_text += "\n"
             
             retry_count += 1
-        
+
+        # A course skipped for a missing/full class never reached the submit;
+        # that is a failure, not a success.
+        if failed_courses:
+            registration_success = False
+
         return result_text, registration_success
 
     def _fetch_student_info(self, unit_code: str) -> dict:
@@ -687,7 +702,8 @@ class BeautifulSoupScraper:
                 REGISTRATION_URL,
                 headers=self.headers,
                 data=data,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -759,7 +775,8 @@ class BeautifulSoupScraper:
                 REGISTRATION_URL,
                 headers=self.headers,
                 data=data,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -801,6 +818,49 @@ class BeautifulSoupScraper:
             logger.error(f"Error fetching course value: {str(e)}")
             return None
     
+    def get_registered_courses(self) -> dict:
+        """Read the registered-courses page: the source of truth for what is
+        actually registered. Returns {"courses": [...], "info": {...}}."""
+        self._check_cancellation()
+        try:
+            response = self.session.get(
+                COURSE_REGISTRATION_URL,
+                headers=self.headers,
+                verify=False,
+                timeout=self.connection_timeout,
+            )
+            self._check_session_expired(response)
+        except SessionExpiredException:
+            if not self._try_relogin():
+                raise
+            return self.get_registered_courses()
+        html = response.content.decode('utf-8', errors='ignore')
+        return {"courses": parse_registered_courses(html), "info": parse_home_page(html)}
+
+    def get_unit_slots(self, unit_code: str) -> list:
+        """Class slots offered for a unit (timing, availability, selectable)."""
+        self._check_cancellation()
+        data = {
+            'reqPaperType': 'M',
+            'reqFregkey': '',
+            'reqUnit': unit_code,
+            'Save': 'View'
+        }
+        try:
+            response = self.session.post(
+                REGISTRATION_URL,
+                headers=self.headers,
+                data=data,
+                verify=False,
+                timeout=self.connection_timeout,
+            )
+            self._check_session_expired(response)
+        except SessionExpiredException:
+            if not self._try_relogin():
+                raise
+            return self.get_unit_slots(unit_code)
+        return parse_unit_slots(response.content.decode('utf-8', errors='ignore'))
+
     def _submit_bidding(self, unit_code: str, student_id: str, paper_type: str, 
                        req_session: str, req_sid: str, req_with_class: str, req_mids: list) -> dict:
         """
@@ -841,10 +901,11 @@ class BeautifulSoupScraper:
             
             # Send the bidding request
             response = self.session.post(
-                'https://unitreg.utar.edu.my/portal/courseRegStu/registration/registerUnitProSurvey.jsp',
+                REGISTER_UNIT_PRO_URL,
                 headers=headers,
                 data=data_bundle,
-                verify=False
+                verify=False,
+                timeout=self.connection_timeout
             )
             
             self._check_session_expired(response)
@@ -868,6 +929,13 @@ class BeautifulSoupScraper:
                     'message': "Course registration successful!"
                 }
             
+            alert = re.search(r"alert\(\s*['\"]([^'\"]*failed[^'\"]*)['\"]", response.text, re.I)
+            if alert:
+                return {
+                    'success': False,
+                    'error': alert.group(1).strip()
+                }
+
             # If we can't definitively determine the status
             return {
                 'success': False,
@@ -894,12 +962,17 @@ class BeautifulSoupScraper:
         Cancel the current session.
         """
         try:
-            self.session.close()
             self._cancellation_token.set()
+            self.session.close()
             self._is_logged_in = False
             logger.info("Session cancelled successfully.")
         except Exception as e:
             logger.error(f"Error cancelling session: {str(e)}")
+
+    def cleanup(self):
+        """Close the HTTP session and release scraper state."""
+        self.cancel()
+        self.reset_cancellation()
 
     def set_max_retries(self, max_retries: int):
         """

@@ -6,6 +6,7 @@ import configparser
 import os
 import sys
 import logging
+from typing import Dict, List
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -50,11 +51,14 @@ def load_config() -> configparser.ConfigParser:
     if not config_path:
         logger.warning(f"Configuration file not found in any of the possible locations")
         logger.warning("Using default configuration values")
-        # Create a default config object
-        return create_default_config()
-    
-    logger.info(f"Loading configuration from: {config_path}")
-    config.read(config_path)
+        config = create_default_config()
+    else:
+        logger.info(f"Loading configuration from: {config_path}")
+        config.read(config_path)
+
+    mock_base_url = os.getenv("UTAR_BASE_URL")
+    if mock_base_url:
+        config["URLs"]["base_url"] = mock_base_url.rstrip("/")
     return config
 
 def create_default_config() -> configparser.ConfigParser:
@@ -63,13 +67,14 @@ def create_default_config() -> configparser.ConfigParser:
     
     base_url = 'https://unitreg.utar.edu.my/portal/courseRegStu'
     # Default URLs
+    # Same values as config.ini (interpolated, so UTAR_BASE_URL overrides all of them).
     config['URLs'] = {
-        'base_url': f'{base_url}/',
-        'login_url': f'{base_url}/login.jsp',
-        'login_process_url': f'{base_url}/login_proc.jsp',
-        'registration_url': f'{base_url}/registration/registerUnitSurvey.jsp',
-        'home_url': f'{base_url}/mainpage.jsp',
-        'course_registration_url': f'{base_url}/registration/registerCourse.jsp'
+        'base_url': base_url,
+        'login_url': '%(base_url)s/login.jsp',
+        'login_process_url': '%(base_url)s/loginProSurvey.jsp',
+        'registration_url': '%(base_url)s/registration/registerUnitSurvey.jsp',
+        'home_url': '%(base_url)s/schedule/masterScheduleSurvey.jsp',
+        'course_registration_url': '%(base_url)s/registration/studentRegistrationSurvey.jsp'
     }
     
     # Default Headers
@@ -80,15 +85,7 @@ def create_default_config() -> configparser.ConfigParser:
     
     # Default Playwright Settings
     config['Playwright'] = {
-        'options': '--disable-gpu,--no-sandbox,--disable-dev-shm-usage',
-        'wait_time_very_short': '1',
-        'wait_time_short': '3',
-        'wait_time_long': '10'
-    }
-
-    # Backward compatibility section
-    config['Selenium'] = {
-        'options': '--disable-gpu,--no-sandbox,--disable-dev-shm-usage',
+        'options': 'disable-gpu,no-sandbox,disable-dev-shm-usage',
         'wait_time_very_short': '1',
         'wait_time_short': '3',
         'wait_time_long': '10'
@@ -105,13 +102,14 @@ def create_default_config() -> configparser.ConfigParser:
       # Default Logging Settings
     config['Logging'] = {
         'level': 'INFO',
-        'format': '%%(asctime)s - %%(name)s - %%(levelname)s - %%(message)s'
+        'format': '%%(asctime)s - %%(name)s - %%(levelname)s - %%(message)s',
+        'debug_dumps': 'false'
     }
 
     config['Storage'] = {
         'sqlite_db_path': 'data/app.db'
     }
-    
+
     return config
 
 # Load configuration
@@ -124,6 +122,7 @@ LOGIN_PROCESS_URL = config['URLs']['login_process_url'] # Route for login form p
 REGISTRATION_URL = config['URLs']['registration_url']
 HOME_URL = config['URLs']['home_url']
 COURSE_REGISTRATION_URL = config['URLs']['course_registration_url']
+REGISTER_UNIT_PRO_URL = f"{BASE_URL}/registration/registerUnitProSurvey.jsp"
 
 # Headers
 DEFAULT_HEADERS = {
@@ -131,15 +130,11 @@ DEFAULT_HEADERS = {
     'Accept': config['Headers']['accept']
 }
 
-# Browser automation settings (Playwright first, Selenium section as fallback)
-_browser_section = 'Playwright' if config.has_section('Playwright') else 'Selenium'
-PLAYWRIGHT_OPTIONS = config[_browser_section]['options'].split(',')
-WAIT_TIME_VERY_SHORT = float(config[_browser_section]['wait_time_very_short'])
-WAIT_TIME_SHORT = float(config[_browser_section]['wait_time_short'])
-WAIT_TIME_LONG = float(config[_browser_section]['wait_time_long'])
-
-# Backward compatibility constant used by legacy modules.
-SELENIUM_OPTIONS = PLAYWRIGHT_OPTIONS
+# Playwright Settings
+PLAYWRIGHT_ARGS = config['Playwright']['options'].split(',')
+WAIT_TIME_VERY_SHORT = float(config['Playwright']['wait_time_very_short'])
+WAIT_TIME_SHORT = float(config['Playwright']['wait_time_short'])
+WAIT_TIME_LONG = float(config['Playwright']['wait_time_long'])
 
 # GUI Settings
 WINDOW_TITLE = config['GUI']['window_title']
@@ -152,6 +147,16 @@ WINDOW_POSITION = (
     int(config['GUI']['window_y'])
 )
 
+# Logging
+# UTAR_LOG_LEVEL (DEBUG/INFO/WARNING/ERROR) overrides config.ini for one session.
+LOG_LEVEL = (os.getenv("UTAR_LOG_LEVEL") or config['Logging'].get('level', 'INFO')).upper()
+if LOG_LEVEL not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+    LOG_LEVEL = "INFO"
+LOG_FORMAT = config['Logging']['format']
+# Save HTTP request/response summaries and Playwright screenshots to logs/debug
+# (sanitised: no passwords, cookies or tokens). Off by default.
+DEBUG_DUMPS = (os.getenv("UTAR_DEBUG_DUMPS") or config['Logging'].get('debug_dumps', 'false')).strip().lower() in ("1", "true", "yes", "on")
+
 # Determine the base directory for logs
 if getattr(sys, 'frozen', False):
     # Running as a bundled executable
@@ -162,15 +167,12 @@ else:
 
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'scraper.log')
+DEBUG_DIR = os.path.join(LOG_DIR, 'debug')
 ERROR_LOG_FILE = os.path.join(LOG_DIR, 'error.log')
 
 # Storage
 _sqlite_db_raw = config['Storage']['sqlite_db_path'] if config.has_section('Storage') else 'data/app.db'
 SQLITE_DB_PATH = _sqlite_db_raw if os.path.isabs(_sqlite_db_raw) else os.path.join(BASE_DIR, _sqlite_db_raw)
-
-# Logging
-LOG_LEVEL = config['Logging']['level']
-LOG_FORMAT = config['Logging']['format']
 
 # Create logs directory if it doesn't exist
 os.makedirs(LOG_DIR, exist_ok=True)

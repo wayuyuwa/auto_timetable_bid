@@ -1,37 +1,37 @@
-"""Settings manager backed by sqlite storage."""
+"""
+Settings manager for the UTAR Course Registration Scraper, backed by SQLite.
+"""
 
-import os
 from typing import Optional, Dict, Any
 
 from ..storage.database import Database, SettingsRepository
 
 class Settings:
     """Settings manager for the application."""
-    
+
     def __init__(self, settings_file: str = "user_settings.json"):
         """
         Initialize the settings manager.
-        
+
         Args:
-            settings_file (str): Path to the settings file
+            settings_file (str): Legacy JSON settings file, imported once into SQLite
         """
         self.settings_file = settings_file
         self.database = Database()
         self.repo = SettingsRepository(self.database)
         self.repo.migrate_from_json(self.settings_file)
         self.settings = self._load_settings()
-    
+
     def _load_settings(self) -> Dict[str, Any]:
         """
-        Load settings from file.
-        
+        Load settings from SQLite.
+
         Returns:
             Dict[str, Any]: Settings dictionary
         """
-        loaded = self.repo.load_settings()
-        default = self._get_default_settings()
-        default.update(loaded)
-        return default
+        settings = self._get_default_settings()
+        settings.update(self.repo.load_settings())
+        return settings
     
     def _get_default_settings(self) -> Dict[str, Any]:
         """
@@ -43,13 +43,12 @@ class Settings:
         return {
             'student_id': '',
             'password': '',
-            'method': 'Request',
-            'headless_mode': False,
-            'font_size': 16
+            'method': 'BeautifulSoup',
+            'headless_mode': False
         }
     
     def save_settings(self):
-        """Save settings to file."""
+        """Save settings to SQLite."""
         self.repo.save_settings(self.settings)
     
     def get_student_id(self) -> str:
@@ -86,7 +85,7 @@ class Settings:
         Returns:
             str: Last used method
         """
-        return self.settings.get('method', 'Playwright')
+        return self.settings.get('method', 'BeautifulSoup')
     
     def get_headless_mode(self) -> bool:
         """
@@ -105,17 +104,12 @@ class Settings:
             int: Maximum number of retries
         """
         return self.settings.get('max_retries', 3)
-
-    def get_font_size(self) -> int:
-        """Get configured UI font size."""
-        return self.settings.get('font_size', 16)
     
     def update_settings(self, student_id: Optional[str] = None, 
                        password: Optional[str] = None,
                        method: Optional[str] = None,
                        headless_mode: Optional[bool] = None,
-                       max_retries: Optional[int] = None,
-                       font_size: Optional[int] = None,):
+                       max_retries: Optional[int] = None,):
         """
         Update settings.
         
@@ -126,7 +120,6 @@ class Settings:
             method (Optional[str]): Last used method to save
             headless_mode (Optional[bool]): Whether to enable headless mode
             max_retries (Optional[int]): Maximum number of retries for scraping
-            font_size (Optional[int]): UI font size in pixels
         """
         if student_id is not None:
             self.settings['student_id'] = student_id
@@ -138,6 +131,4 @@ class Settings:
             self.settings['headless_mode'] = headless_mode
         if max_retries is not None:
             self.settings['max_retries'] = max_retries
-        if font_size is not None:
-            self.settings['font_size'] = font_size
         self.save_settings() 
