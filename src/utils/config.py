@@ -86,9 +86,9 @@ def create_default_config() -> configparser.ConfigParser:
     # Default Playwright Settings
     config['Playwright'] = {
         'options': 'disable-gpu,no-sandbox,disable-dev-shm-usage',
-        'wait_time_very_short': '1',
-        'wait_time_short': '3',
-        'wait_time_long': '10'
+        'wait_time_very_short': '0.5',
+        'wait_time_short': '1',
+        'wait_time_long': '3'
     }
     
     # Default GUI Settings
