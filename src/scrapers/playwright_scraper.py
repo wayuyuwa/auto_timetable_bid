@@ -42,6 +42,11 @@ logger = setup_logger(__name__)
 CLEANUP_WAIT_SECONDS = 15
 
 
+class SessionExpired(RuntimeError):
+    """The portal ended the session (it answers with its sessionExpired page).
+    The message keeps the word "expired": PlanRunner looks for it."""
+
+
 class _OwnerThread:
     """Single daemon thread that owns the Playwright sync API objects.
 
@@ -181,6 +186,56 @@ class PlaywrightScraper:
             save_page(self.page, "page-" + url.rstrip("/").rsplit("/", 1)[-1].split("?")[0])
         self._check_cancellation()
 
+    @classmethod
+    def _session_gone(cls, page) -> bool:
+        """The portal's expired page, or its plain login form (no "Log Out" link), is showing.
+        Only for registration pages: during login a login form can just mean a wrong captcha."""
+        if cls._looks_expired(page):
+            return True
+        try:
+            return bool(page.locator("input[name=kaptchafield]").count()) and not page.locator(
+                "span:has-text('Log Out')").count()
+        except PlaywrightError:
+            return False
+
+    def _open(self, url: str):
+        """Go to a portal page; SessionExpired when the session has ended."""
+        self._goto(url)
+        if self._session_gone(self.page):
+            self._is_logged_in = False
+            raise SessionExpired("Session expired")
+
+    def _expired_after(self, error) -> bool:
+        """True when `error` came from an ended session: SessionExpired itself, or a
+        timeout while waiting for a page element after the portal sent the expired page."""
+        if isinstance(error, SessionExpired):
+            return True
+        return isinstance(error, PlaywrightTimeoutError) and bool(self.page) and self._session_gone(self.page)
+
+    def _relogin(self):
+        """Log in again after the portal ended the session (stale cookies cleared first)."""
+        if not self.student_id or not self.password:
+            raise SessionExpired("Session expired and there are no stored credentials to log in again")
+        logger.warning("Session expired; logging in again")
+        self._is_logged_in = False
+        try:
+            if self.context:
+                self.context.clear_cookies()
+            self.login(self.student_id, self.password, max_retries=2, progress=lambda *_: None)
+        except LoginError as error:
+            raise SessionExpired(f"Session expired and logging in again failed: {error}") from error
+
+    def _with_relogin(self, operation):
+        """Run a read-only page operation. If the portal ended the session, log in
+        again once and run it again (reading never bids, so repeating it is safe)."""
+        try:
+            return operation()
+        except (SessionExpired, PlaywrightTimeoutError) as error:
+            if not self._expired_after(error):
+                raise
+        self._relogin()
+        return operation()
+
     LOGIN_ATTEMPTS = 3
     CLOSED_AFTER = 2
 
@@ -265,10 +320,19 @@ class PlaywrightScraper:
 
     @staticmethod
     def _looks_expired(page) -> bool:
-        try:
-            return "sessionExpired" in page.url or "sessionExpired" in page.content()
-        except PlaywrightError:
-            return False
+        # The expired answer is a script that moves the browser on, so the page can be
+        # mid-navigation (content() fails then): look again before saying "no".
+        for attempt in range(3):
+            try:
+                return "sessionExpired" in page.url or "sessionExpired" in page.content()
+            except PlaywrightError:
+                if attempt == 2:
+                    return False
+                try:
+                    page.wait_for_timeout(200)
+                except PlaywrightError:
+                    return False
+        return False
 
     def _login_once(self, page, student_id, password):
         """(None, False) on success, else (reason, looks_closed)."""
@@ -320,33 +384,39 @@ class PlaywrightScraper:
 
     @_on_owner_thread
     def get_home_page_data(self):
-        page = self._ensure_page()
-        self._goto(COURSE_REGISTRATION_URL)
-        return parse_home_page(page.content()), self.context.cookies()
+        def read():
+            self._open(COURSE_REGISTRATION_URL)
+            return parse_home_page(self.page.content()), self.context.cookies()
+
+        return self._with_relogin(read)
 
     @_on_owner_thread
     def get_registered_courses(self) -> dict:
         """Read the registered-courses page: the source of truth for what is
         actually registered. Returns {"courses": [...], "info": {...}}."""
-        page = self._ensure_page()
-        self._goto(COURSE_REGISTRATION_URL)
-        if self._looks_expired(page):
-            self._is_logged_in = False
-            raise RuntimeError("Session expired")
-        html = page.content()
-        save_page(page, "registered-page")
-        return {"courses": parse_registered_courses(html), "info": parse_home_page(html)}
+
+        def read():
+            self._open(COURSE_REGISTRATION_URL)
+            html = self.page.content()
+            save_page(self.page, "registered-page")
+            return {"courses": parse_registered_courses(html), "info": parse_home_page(html)}
+
+        return self._with_relogin(read)
 
     @_on_owner_thread
     def get_unit_slots(self, unit_code: str) -> list:
         """Class slots offered for a unit (timing, availability, selectable)."""
-        page = self._ensure_page()
-        self._goto(COURSE_REGISTRATION_URL)
-        page.locator("table#tblGrid").wait_for(state="visible")
-        page.locator("input#reqUnit[name=reqUnit]").fill(unit_code)
-        page.locator("input#reqUnit[name=reqUnit]").press("Enter")
-        page.locator("form[name=frmSummary]").wait_for(state="visible")
-        return parse_unit_slots(page.content())
+
+        def read():
+            self._open(COURSE_REGISTRATION_URL)
+            page = self.page
+            page.locator("table#tblGrid").wait_for(state="visible")
+            page.locator("input#reqUnit[name=reqUnit]").fill(unit_code)
+            page.locator("input#reqUnit[name=reqUnit]").press("Enter")
+            page.locator("form[name=frmSummary]").wait_for(state="visible")
+            return parse_unit_slots(page.content())
+
+        return self._with_relogin(read)
 
     @_on_owner_thread
     def store_cookies(self, path: str = "cookies.txt"):
@@ -354,10 +424,31 @@ class PlaywrightScraper:
             with open(path, "w", encoding="utf-8") as file:
                 json.dump(self.context.cookies(), file)
 
+    def _registered_codes(self) -> set:
+        """Course codes on the registered-courses page."""
+        self._open(COURSE_REGISTRATION_URL)
+        return {entry["code"] for entry in parse_registered_courses(self.page.content())}
+
     @_on_owner_thread
     def register_course(self, course: Course) -> tuple[str, bool]:
-        page = self._ensure_page()
-        self._goto(COURSE_REGISTRATION_URL)
+        """Bid one course. If the session ends, log in again; a bid that may have
+        reached the portal is never sent again before the registered list was read."""
+        clicked = []  # filled once Submit was clicked
+
+        try:
+            return self._register_once(course, clicked)
+        except (SessionExpired, PlaywrightTimeoutError) as error:
+            if not self._expired_after(error):
+                raise
+        self._relogin()
+        if clicked and course.code in self._registered_codes():
+            return f"Registered {course.code}", True
+        clicked.clear()
+        return self._register_once(course, clicked)
+
+    def _register_once(self, course: Course, clicked: list) -> tuple[str, bool]:
+        self._open(COURSE_REGISTRATION_URL)
+        page = self.page
         page.locator("table#tblGrid").wait_for(state="visible")
         page.locator("input#reqUnit[name=reqUnit]").fill(course.code)
         page.locator("input#reqUnit[name=reqUnit]").press("Enter")
@@ -396,6 +487,7 @@ class PlaywrightScraper:
             dialog.accept()
 
         page.once("dialog", handle_dialog)
+        clicked.append(True)
         page.locator("input[name=Submit]").last.click()
         self._check_cancellation()
         try:
@@ -403,6 +495,10 @@ class PlaywrightScraper:
             page.wait_for_load_state("domcontentloaded", timeout=WAIT_TIME_SHORT * 1000)
         except PlaywrightTimeoutError:
             pass
+        if self._session_gone(page):
+            # The answer to the bid is the expired page, not a result.
+            self._is_logged_in = False
+            raise SessionExpired("Session expired while submitting")
         message = dialog_message[0] if dialog_message else ""
         save_page(page, f"register-result-{course.code}")
         if "valid class combination" in message.lower():
@@ -421,6 +517,9 @@ class PlaywrightScraper:
             self._check_cancellation()
             try:
                 message, course_success = self.register_course(course)
+            except SessionExpired as error:
+                results.append(str(error))
+                return "\n".join(results), False  # no session: the other courses cannot be bid either
             except (PlaywrightError, PlaywrightTimeoutError) as error:
                 message, course_success = f"Registration error: {error}", False
             results.append(message)

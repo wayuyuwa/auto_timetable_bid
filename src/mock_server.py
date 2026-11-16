@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -24,6 +25,9 @@ def ensure_state(server):
     full_slots   : {(code, type, group)} rendered with Avail 0 and no checkbox
     slot_times   : {(code, type, group): (day, start_hour, hours)} overrides
     unknown_units: unit codes that return no slots
+    expire_rules : {path suffix: {"mode", "times"}} one-shot failures, see expire_next()
+    hits         : Counter of requests per page name (every request, answered or not)
+    processed_submits: bids that really reached the registration logic
     """
     if not hasattr(server, "registered"):
         server.registered = {}
@@ -32,6 +36,9 @@ def ensure_state(server):
         server.unknown_units = set()
         server.credits = {}
         server.max_credit = 20
+        server.expire_rules = {}
+        server.hits = Counter()
+        server.processed_submits = 0
         server.state_lock = threading.Lock()
     return server
 
@@ -39,9 +46,21 @@ def ensure_state(server):
 def reset_state(server):
     """Forget registrations and overrides (use between test cases)."""
     ensure_state(server)
-    for name in ("registered", "full_slots", "slot_times", "unknown_units", "credits"):
+    for name in ("registered", "full_slots", "slot_times", "unknown_units", "credits", "expire_rules", "hits"):
         getattr(server, name).clear()
+    server.processed_submits = 0
     return server
+
+
+def expire_next(server, path_suffix, mode="js", times=1):
+    """Make the next `times` requests whose path ends with `path_suffix` fail once.
+
+    js            answer with the portal's "session expired" script (what the real portal does)
+    loginpage     answer with the plain login page (HTTP 200, no "session expired" text)
+    hang          answer only after server.delay seconds, without processing the request
+    apply-then-js process the bid, then answer "session expired" (the answer was lost)
+    """
+    ensure_state(server).expire_rules[path_suffix] = {"mode": mode, "times": times}
 
 
 def slot_time(server, code, slot_type, group):
@@ -129,7 +148,43 @@ class MockHandler(BaseHTTPRequestHandler):
         self._form_lists = parse_qs(self.rfile.read(length).decode())
         return {key: values[0] for key, values in self._form_lists.items()}
 
+    def _gate(self):
+        """Count the request and apply a one-shot test failure (expire_next).
+        Returns True when the request was answered here."""
+        server = ensure_state(self.mock_server)
+        path = urlparse(self.path).path
+        with server.state_lock:
+            server.hits[path.rsplit("/", 1)[-1]] += 1
+            rule = next((r for suffix, r in server.expire_rules.items()
+                         if path.endswith(suffix) and r["times"] > 0), None)
+            if rule is not None:
+                rule["times"] -= 1
+        if rule is None:
+            return False
+        if self.command == "POST":
+            self._form()
+        mode = rule["mode"]
+        if mode == "loginpage":
+            self._send(LOGIN_PAGE.format(tmp=0, message=""))
+        elif mode == "hang":
+            time.sleep(server.delay)
+            self._send("<div class='red'>Mock request answered too late</div>")
+        else:
+            if mode == "apply-then-js":
+                form = {key: values[0] for key, values in self._form_lists.items()}
+                self._register(form.get("reqUnit", ""), self._form_lists.get("reqMid", []))
+            self._send(SESSION_EXPIRED_PAGE)
+        return True
+
     def do_GET(self):
+        if not self._gate():
+            self._handle_get()
+
+    def do_POST(self):
+        if not self._gate():
+            self._handle_post()
+
+    def _handle_get(self):
         path = urlparse(self.path).path
         base = self.mock_server.base_path
         if path == f"{base}/login.jsp":
@@ -150,7 +205,7 @@ class MockHandler(BaseHTTPRequestHandler):
         else:
             self._send("Not found", status=404)
 
-    def do_POST(self):
+    def _handle_post(self):
         path = urlparse(self.path).path
         base = self.mock_server.base_path
         form = self._form()
@@ -185,6 +240,8 @@ class MockHandler(BaseHTTPRequestHandler):
         """Apply a registration like the real portal: reject full or clashing
         classes, otherwise record it so the registered-courses page shows it."""
         server = ensure_state(self.mock_server)
+        with server.state_lock:
+            server.processed_submits += 1
         classes = {}
         for mid in mids:
             match = re.fullmatch(r"(.+)-([LTP])(\d+)", mid)

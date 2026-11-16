@@ -142,6 +142,9 @@ venv\Scripts\python tests\stress\run_stress.py --quick
 
 # Features from issues.txt (login kinds, scheduling, credentials, browser path, ...)
 venv\Scripts\python -m unittest tests/test_issue_fixes.py
+
+# Session expiry in both scrapers (relogin, no duplicate bids, give-up limits)
+venv\Scripts\python -m unittest tests/test_session_expiry.py
 ```
 
 ### Real-server check (no bidding)

@@ -8,7 +8,8 @@ from bs4 import BeautifulSoup
 import urllib3
 import socket
 import os
-from time import sleep
+from collections import deque
+from time import monotonic, sleep
 from threading import Event, Lock, RLock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -73,11 +74,17 @@ class BeautifulSoupScraper:
         self._is_logged_in = False
         self._relogin_lock = RLock()  # Lock to prevent multiple relogin attempts
         self._relogin_active = False  # True while a relogin is running
+        self._relogin_times = deque()  # when recent relogins started (see RELOGIN_LIMIT)
         self._logging_in = False  # True inside login(); disables nested relogin
         self._home_data = None
         self.on_login_progress = None  # optional callback(attempt, max, previous_reason)
         
         logger.info("BeautifulSoupScraper initialized")
+
+    # A portal that accepts the login but keeps ending the session must not make us
+    # log in forever: at most RELOGIN_LIMIT relogins per RELOGIN_WINDOW seconds.
+    RELOGIN_LIMIT = 3
+    RELOGIN_WINDOW = 60
 
     def _new_session(self):
         """Build the HTTP session.
@@ -131,13 +138,16 @@ class BeautifulSoupScraper:
             logger.info("Operation cancelled by user")
             raise Exception("Operation cancelled by user")
             
-    def _check_session_expired(self, response):
+    def _check_session_expired(self, response, login_page_means_expired=False):
         """
         Check if the session has expired based on the response content.
-        
-        Args:
-            response (Response): The HTTP response object
-            
+
+        The real portal answers an ended session with a short script that sends the
+        browser to a sessionExpired page. With login_page_means_expired (every
+        registration step, not the login itself, where a login page can simply mean
+        a wrong captcha) a plain login page also counts as an ended session, so an
+        empty or unparsable page is never mistaken for "nothing registered".
+
         Raises:
             SessionExpiredException: If the session has expired
         """
@@ -146,6 +156,10 @@ class BeautifulSoupScraper:
             # Check for session expired redirects in JavaScript
             if "window.parent.location.href" in content and "sessionExpired" in content:
                 logger.warning("Session has expired")
+                self._is_logged_in = False
+                raise SessionExpiredException("Session has expired. Please log in again.")
+            if login_page_means_expired and "kaptchafield" in content and "Log Out" not in content:
+                logger.warning("The portal answered with its login page; the session has ended")
                 self._is_logged_in = False
                 raise SessionExpiredException("Session has expired. Please log in again.")
 
@@ -172,6 +186,15 @@ class BeautifulSoupScraper:
             if self._is_logged_in:
                 # Another thread already relogged in successfully
                 return True
+
+            now = monotonic()
+            while self._relogin_times and now - self._relogin_times[0] > self.RELOGIN_WINDOW:
+                self._relogin_times.popleft()
+            if len(self._relogin_times) >= self.RELOGIN_LIMIT:
+                logger.error("The session ended %s times within %s s; not logging in again",
+                             self.RELOGIN_LIMIT, self.RELOGIN_WINDOW)
+                return False
+            self._relogin_times.append(now)
 
             logger.info("Attempting to relogin due to session expiration")
             self._relogin_active = True
@@ -549,84 +572,104 @@ class BeautifulSoupScraper:
     def register_courses(self, courses: list[Course]) -> tuple:
         """
         Register multiple courses using BeautifulSoup with optimized bidding strategy.
-        Includes retry mechanism for failed course registrations.
-        
+        Reading steps (student info, class values) are retried; a bid is never sent
+        twice when it may already have reached the portal.
+
         Args:
             courses (list): List of Course objects to register
-            
+
         Returns:
             tuple: (result_text, success_status)
             - result_text: Detailed text of registration process results
-            - success_status: Boolean indicating overall success
+            - success_status: True only when every course ended up registered
         """
         if not courses:
             logger.warning("No courses provided for registration")
             return "No courses provided for registration", False
-        
+
         result_text = "BeautifulSoup Course Registration Results:\n\n"
-        registration_success = True
-        
-        # Track courses that need retry
-        failed_courses = courses[:]
+
+        failed_courses = courses[:]   # still to try: read problems, a portal "no", an ended session
         successful_courses = []
+        unknown_courses = []          # bid sent, outcome unknown: never sent again here
+        maybe_sent = set()            # the session ended during the bid: it may have been processed
         retry_count = 0
-        
+
         while failed_courses and retry_count < self.max_retries:
             self._check_cancellation()
-            
+
             for course in list(failed_courses):
                 self._check_cancellation()
-                
+
                 logger.info(f"Attempting to register course: {course.code} - {course.name}")
                 result_text += f"Course: {course.code} - {course.name}\n"
-                
+                stage = "fetch"
+
                 try:
+                    if course.code in maybe_sent:
+                        # The session ended while this bid was in flight. Look at the
+                        # registered list before anything is sent again.
+                        registered = self._registered_codes()
+                        if registered is None:
+                            result_text += ("Could not confirm whether the earlier bid went through, "
+                                            "so it is not sent again. Check your registered courses.\n\n")
+                            unknown_courses.append(course)
+                            failed_courses.remove(course)
+                            continue
+                        if course.code in registered:
+                            logger.info(f"{course.code} is on the registered list; not sending it again")
+                            result_text += "Already registered (confirmed on the registered list).\n\n"
+                            successful_courses.append(course)
+                            failed_courses.remove(course)
+                            continue
+
                     # Step 1: Fetch student info for the course
                     student_data = self._fetch_student_info(course.code)
                     if not student_data:
                         logger.warning(f"Could not fetch student info for {course.code}")
                         result_text += f"Failed to fetch student information\n"
                         continue
-                    
+
                     self._check_cancellation()
-                    
+
                     # Extract required values from student data
                     student_id = student_data.get('student_id')
                     paper_type = student_data.get('paper_type')
                     req_session = student_data.get('req_session')
                     req_sid = student_data.get('reqsid')
                     req_with_class = student_data.get('req_with_class')
-                    
+
                     result_text += f"Student ID: {student_id}\n"
-                    
+
                     # Step 2: Get all class types and their corresponding values
                     class_values = {}
-                    
+
                     # Group classes by type (L, T, P)
                     for class_type, slot_numbers in course.slots.items():
                         if not slot_numbers:  # Skip empty slots
                             continue
-                        
+
                         # For each slot number in priority order
                         for slot_number in slot_numbers:
                             class_code = f"{class_type}{slot_number}"
                             course_value = self._fetch_course_value(course.code, class_code)
-                            
+
                             if course_value:
                                 class_values[class_code] = course_value
                                 result_text += f"Found {class_code} value: {course_value[:8]}...\n"
                                 break  # Stop after finding the first available slot for each type
                             else:
                                 result_text += f"Could not find {class_code} value\n"
-                    
+
                     # Check if we found values for all required class types
                     if len(class_values) < sum(1 for slots in course.slots.values() if slots):
                         missing_types = set(course.slots.keys()) - {code[0] for code in class_values.keys()}
                         logger.warning(f"Could not find values for all required class types: {missing_types}")
                         result_text += f"Missing values for class types: {', '.join(missing_types)}\n"
                         continue
-                    
+
                     # Step 3: Submit registration using the bidding approach
+                    stage = "submit"
                     bidding_result = self._submit_bidding(
                         course.code,
                         student_id,
@@ -636,47 +679,65 @@ class BeautifulSoupScraper:
                         req_with_class,
                         list(class_values.values())
                     )
-                    
+
                     if bidding_result.get('success'):
                         logger.info(f"Successfully registered {course.code}")
                         result_text += f"{bidding_result.get('message', 'Registration successful!')}\n"
                         successful_courses.append(course)
                         failed_courses.remove(course)
+                    elif bidding_result.get('outcome') == 'unknown':
+                        # Timeout, odd answer or error after the bid left: it may have been
+                        # processed, so it is not sent again. The runner checks the
+                        # registered list afterwards.
+                        logger.warning(f"Outcome of the bid for {course.code} is unknown: {bidding_result.get('error')}")
+                        result_text += (f"{bidding_result.get('error', 'Registration status unclear')}\n"
+                                        "The outcome is unknown, so the bid is not sent again. "
+                                        "Check your registered courses.\n")
+                        unknown_courses.append(course)
+                        failed_courses.remove(course)
                     else:
                         logger.warning(f"Registration failed for {course.code}: {bidding_result.get('error')}")
                         result_text += f"{bidding_result.get('error', 'Registration failed')}\n"
-                        registration_success = False
-                
+
                 except SessionExpiredException:
                     logger.warning(f"Session expired while registering {course.code}, attempting relogin")
+                    if stage == "submit":
+                        maybe_sent.add(course.code)
                     # Try to relogin and continue
                     if self._try_relogin():
                         logger.info(f"Successfully relogged in, continuing with registration for {course.code}")
                         result_text += "Session expired but successfully relogged in\n"
-                        # Don't mark as failure, just continue with this course in the next iteration
+                        # The course stays in failed_courses: the next pass re-reads its values
+                        # with the new session (after checking the registered list for a bid
+                        # that may have gone through).
                     else:
                         logger.error(f"Session expired and relogin failed while registering {course.code}")
                         result_text += "Session expired and relogin failed. Please log in again.\n"
-                        registration_success = False
-                        return result_text, registration_success
-                    
+                        return result_text, False
+
                 except Exception as e:
                     self._check_cancellation()  # Check if it was cancelled
-                    
+
                     logger.error(f"Error registering course {course.code}: {str(e)}")
                     result_text += f"Error: {str(e)}\n"
-                    registration_success = False
-                
+
                 result_text += "\n"
-            
+
             retry_count += 1
 
-        # A course skipped for a missing/full class never reached the submit;
-        # that is a failure, not a success.
-        if failed_courses:
-            registration_success = False
+        # Success only when every course ended up registered; a course skipped for a
+        # missing/full class never reached the submit, and one with an unknown outcome
+        # is not confirmed.
+        return result_text, not failed_courses and not unknown_courses
 
-        return result_text, registration_success
+    def _registered_codes(self):
+        """Course codes on the registered-courses page, or None when it cannot be read."""
+        try:
+            return {entry["code"] for entry in self.get_registered_courses()["courses"]}
+        except Exception as error:  # noqa: BLE001
+            self._check_cancellation()
+            logger.warning("Could not read the registered courses: %s", error)
+            return None
 
     def _fetch_student_info(self, unit_code: str) -> dict:
         """
@@ -706,7 +767,7 @@ class BeautifulSoupScraper:
                 timeout=self.connection_timeout
             )
             
-            self._check_session_expired(response)
+            self._check_session_expired(response, login_page_means_expired=True)
             self._check_cancellation()
             
             if response.status_code != 200:
@@ -779,7 +840,7 @@ class BeautifulSoupScraper:
                 timeout=self.connection_timeout
             )
             
-            self._check_session_expired(response)
+            self._check_session_expired(response, login_page_means_expired=True)
             self._check_cancellation()
             
             if response.status_code != 200:
@@ -829,7 +890,7 @@ class BeautifulSoupScraper:
                 verify=False,
                 timeout=self.connection_timeout,
             )
-            self._check_session_expired(response)
+            self._check_session_expired(response, login_page_means_expired=True)
         except SessionExpiredException:
             if not self._try_relogin():
                 raise
@@ -854,18 +915,24 @@ class BeautifulSoupScraper:
                 verify=False,
                 timeout=self.connection_timeout,
             )
-            self._check_session_expired(response)
+            self._check_session_expired(response, login_page_means_expired=True)
         except SessionExpiredException:
             if not self._try_relogin():
                 raise
             return self.get_unit_slots(unit_code)
         return parse_unit_slots(response.content.decode('utf-8', errors='ignore'))
 
-    def _submit_bidding(self, unit_code: str, student_id: str, paper_type: str, 
+    def _submit_bidding(self, unit_code: str, student_id: str, paper_type: str,
                        req_session: str, req_sid: str, req_with_class: str, req_mids: list) -> dict:
         """
         Submit the bidding request with multiple class values.
-        
+
+        Never sends the bid twice. Result keys: success, message/error and outcome:
+        "success", "rejected" (the portal said no: nothing registered) or "unknown"
+        (timeout, odd answer or error after the bid left, it may have been processed).
+        An ended session raises SessionExpiredException; the caller logs in again,
+        checks the registered list and only then sends the bid with fresh values.
+
         Args:
             unit_code (str): Course code
             student_id (str): Student ID
@@ -874,7 +941,7 @@ class BeautifulSoupScraper:
             req_sid (str): SID value
             req_with_class (str): WithClass value
             req_mids (list): List of course values (reqMid)
-            
+
         Returns:
             dict: Result of the bidding process
         """
@@ -890,7 +957,7 @@ class BeautifulSoupScraper:
                 'act': 'insert',
                 'reqMid': req_mids  # List of values
             }
-            
+
             # Set headers for the request
             headers = {
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -898,7 +965,7 @@ class BeautifulSoupScraper:
                 'Origin': 'https://unitreg.utar.edu.my',
                 'Referer': 'https://unitreg.utar.edu.my/portal/courseRegStu/registration/registerUnitSurvey.jsp'
             }
-            
+
             # Send the bidding request
             response = self.session.post(
                 REGISTER_UNIT_PRO_URL,
@@ -907,18 +974,19 @@ class BeautifulSoupScraper:
                 verify=False,
                 timeout=self.connection_timeout
             )
-            
-            self._check_session_expired(response)
-            
+
+            self._check_session_expired(response, login_page_means_expired=True)
+
             if response.status_code != 200:
                 return {
                     'success': False,
+                    'outcome': 'unknown',
                     'error': f"Received status code {response.status_code}"
                 }
-            
+
             # Parse the response to check for success or error messages
             soup = BeautifulSoup(response.content, 'html.parser')
-            
+
             # Check for success messages with class = red
             success_msg = soup.find('div', class_='red')
             # check if insert-success is in response.url
@@ -926,37 +994,35 @@ class BeautifulSoupScraper:
                 success_msg and "success" in success_msg.get_text(strip=True).lower():
                 return {
                     'success': True,
+                    'outcome': 'success',
                     'message': "Course registration successful!"
                 }
-            
+
             alert = re.search(r"alert\(\s*['\"]([^'\"]*failed[^'\"]*)['\"]", response.text, re.I)
             if alert:
                 return {
                     'success': False,
+                    'outcome': 'rejected',
                     'error': alert.group(1).strip()
                 }
 
             # If we can't definitively determine the status
             return {
                 'success': False,
+                'outcome': 'unknown',
                 'error': "Bidding request submitted, but status unclear"
             }
-            
+
         except SessionExpiredException:
-            # Try to relogin and retry the operation
-            if self._try_relogin():
-                logger.info("Retrying _submit_bidding after successful relogin")
-                return self._submit_bidding(unit_code, student_id, paper_type, req_session, req_sid, req_with_class, req_mids)
-            else:
-                # Propagate the session expired exception to be handled by the caller
-                raise
+            raise  # the caller logs in again and re-reads everything with the new session
         except Exception as e:
             logger.error(f"Error in bidding submission: {str(e)}")
             return {
                 'success': False,
+                'outcome': 'unknown',
                 'error': f"Error in bidding submission: {str(e)}"
             }
-    
+
     def cancel(self):
         """
         Cancel the current session.

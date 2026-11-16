@@ -3,7 +3,7 @@
 Living map of this repo so any person or agent can find what to edit quickly.
 **Rule: whenever code, config, tests or behaviour change, update this file in the same commit** (map, "where to edit", flows and the change log at the bottom). Every change-log row names its commit hash and files.
 
-Last updated: 2026-11-16 (session-expiry findings).
+Last updated: 2026-11-17 (session-expiry fixes).
 
 ## What the app is
 
@@ -54,9 +54,14 @@ src/
                                 BrowserMissing; portal_rejection(code, text) maps login.jsp?message=<code> redirects
     beautifulsoup_scraper.py    requests-based scraper: login() loops _login_once() (progress callback, typed errors,
                                 stops after 2 "closed" answers), relogin (RLock + _relogin_active guard; no nested
-                                relogin inside login), register_courses, get_registered_courses, get_unit_slots
+                                relogin inside login; at most RELOGIN_LIMIT relogins per RELOGIN_WINDOW), register_courses
+                                (a bid is never re-sent when it may have reached the portal), get_registered_courses,
+                                get_unit_slots; _check_session_expired(login_page_means_expired=True) on every
+                                registration step
     playwright_scraper.py       Chromium scraper; all Playwright calls run on one _OwnerThread. login() retries
-                                (typed errors), missing Chromium -> BrowserMissing, screenshots via diagnostics
+                                (typed errors), missing Chromium -> BrowserMissing, screenshots via diagnostics.
+                                _open() + _with_relogin() (SessionExpired, relogin once) around every read; register_course
+                                checks the registered list before re-sending a bid that may have gone through
     html_parser.py              Pure HTML parsing: student data, course values, home page,
                                 parse_registered_courses, parse_unit_slots, parse_time_range, sessions_clash
     base_scraper.py             Abstract interface
@@ -81,6 +86,8 @@ src/
   mock_server.py                Local mock of the UTAR portal. Scenarios: success, register-fail, timeout,
                                 session-expired, closed, not-active, not-adviser (login refused with
                                 login.jsp?message=<code>). Serves the real sample Kaptcha.jpg.
+                                expire_next(server, page, mode, times) makes the next request(s) fail once (js / loginpage /
+                                hang / apply-then-js); server.hits and server.processed_submits count requests / bids processed.
 
 web/
   src/App.vue                   Whole UI. Header (title, run chip with phase/elapsed/countdown, Start/Pre-flight/Stop),
@@ -95,6 +102,7 @@ web/
 tests/
   test_plan_runner.py           Engine unit tests (runner, verification, fallback, freeze/relogin regressions)
   test_mock_server.py           Mock server tests
+  test_session_expiry.py        Session expiry in BS and Playwright (expire_next rules): relogin, no double bid, give-up limits
   test_utar_html_parser.py      Parser tests vs real saved pages; auto-skips if F:\utar is missing
   test_issue_fixes.py           issues.txt features: login kinds, scheduled login retry, preflight w/o plan, stopping,
                                 credentials, import modes, browser path, diagnostics, real-server CLI, process guard
@@ -162,6 +170,8 @@ How it works from the outside (headers only; no server source seen): Apache 2.4.
 
 **Multi-tab check (Playwright, real portal, 2026-11-16, read-only):** opening the one-time login address `indexSurvey.jsp?passid=<token>` in a second tab is answered with `login.jsp?message=notSupportTab`, and the original window's session is then dead too (expired page). Opening the plain `studentRegistrationSurvey.jsp` address in a new tab, or in a new browser context holding the same cookies, stays logged in; a context without the cookies gets the expired page. After login Playwright's address is `.../registration/studentRegistrationSurvey.jsp` (no `passid`). `notSupportTab` is not mapped in `scrapers/errors.py` (the app would show it as a generic "Portal sent the login back"). Not yet tested: lookups from two tabs at once, and what the owner's browser showed in the address bar when a pasted address logged them out (guess, unverified: the `passid` address, or a tab marker such as sessionStorage that a duplicated tab copies and a new window lacks).
 
+**Session expiry (both scrapers):** a read (registered list, home data, unit slots, class lookup) that gets the portal's expired page - or, new, a plain login page - logs in again once and repeats the read (BS: `_try_relogin`, capped at 3 per minute; Playwright: `_with_relogin`, cookies cleared first). A bid is never sent twice when it may have reached the portal: an expired answer to a bid is followed by a login, a look at the registered list (already there = done) and only then one more bid with freshly read values; a timeout, an unclear answer or an error leaves the bid unsent-again and reported as outcome unknown (the runner's registered-list check settles it). If the session cannot be restored both raise a message containing "expired" (Playwright `SessionExpired`, BS `SessionExpiredException`) and the runner's own relogin handles the rest.
+
 **Stop:** `DesktopApi.cancel()` → runner cancel → scraper cancel; watchdog marks the run cancelled after `STOP_GRACE_SECONDS` (25 s) if the worker hangs. BS cancel floor ~10 s is deliberate (avoid double-submitting a bid).
 
 **Releases (GitHub workflow):** job `build` (windows-latest, Python 3.10, Node 22) runs `build_exe.py`, fails if `dist\UnitRegTimetable\UnitRegTimetable.exe` is missing, zips the app folder + `config.ini` + `resources\` into `UnitRegTimetable.zip` and hands it to job `release` as an Actions artifact. That artifact is only a hand-over: GitHub deletes artifacts after the repo's retention period (90 days at most on a public repo), so it is not the permanent copy. Job `release` attaches the zip to a GitHub Release, which never expires.
@@ -191,6 +201,7 @@ venv\Scripts\python tests\stress\run_stress.py --quick
 venv\Scripts\python -m src.mock_server --scenario closed   # run the mock by hand
 ```
 venv\Scripts\python -m unittest tests/test_issue_fixes.py   # issues.txt features (uses the mock)
+venv\Scripts\python -m unittest tests/test_session_expiry.py   # session expiry, both scrapers (~100 s)
 venv\Scripts\python main.py --test-real-server --student-id ID --prompt   # REAL portal, login + read only
 ```
 Last known: see docs/run-report.md (issues.txt run).
@@ -199,7 +210,7 @@ Last known: see docs/run-report.md (issues.txt run).
 ## Known gaps / open items
 
 - Group switch not automated (needs `changeClass.jsp` capture).
-- Session-expiry gaps (mock probe 2026-11-16, no code changed yet): Playwright `get_unit_slots`, `register_course` and `get_home_page_data` have no expiry check (generic 3 s timeout, no relogin) and a Playwright submit answered with the expired page is reported "Registered" (the runner's registered-list check corrects it). BS `register_courses` re-sends a bid on its second pass after a timeout or unclear answer and returns success=False even when that pass registered the course; BS `_submit_bidding` has no cap on relogin+resubmit cycles. A plain login page instead of the expired page is not handled by either method, but the real portal was not seen doing that.
+- Session-expiry handling is proven on the mock (tests/test_session_expiry.py) and, for the Playwright registered-list relogin, on the real portal (2026-11-17). The real lookup and bid path could not be exercised: right after a normal login the real registration page had no `input#reqUnit` (registration probably not open for the account; unverified).
 - Registered-list parsing based on Dec 2023 page snapshots; not checked on the live "...Survey.jsp" flow.
 - BS submit check looks for `div.red`, real pages use `span.red` (alert-text detection partly covers it).
 - `README.zh.md` is behind `README.md`.
@@ -216,6 +227,7 @@ hash is filled in by the next commit. Run `git log --oneline` for anything missi
 
 | Commit | Date | What changed | Files |
 |---|---|---|---|
+| (pending) | 2026-11-17 | Session expiry fixed in both scrapers. Playwright: `_open`/`_with_relogin` give every read an expiry check and one relogin (cookies cleared); a bid answered with the expired page is no longer reported "Registered"; a bid that may have gone through is checked against the registered list before being re-sent. BS: a plain login page counts as an ended session on registration steps; relogin capped (3 per 60 s); `_submit_bidding` no longer relogs in and re-sends with old values; no automatic re-send after a timeout or unclear answer (outcome unknown); success flag no longer sticks at False after a retried read. Mock: `expire_next`, `hits`, `processed_submits`. New `tests/test_session_expiry.py` (22 tests). Verified on the real portal: Playwright registered-list relogin after cleared cookies | src/scrapers/beautifulsoup_scraper.py, src/scrapers/playwright_scraper.py, src/mock_server.py, tests/test_session_expiry.py, README.md, .claude/skills/utar-verify/SKILL.md, docs/KNOWLEDGE.md |
 | `69715db` | 2026-11-16 | Docs only: portal `notSupportTab` multi-tab check found by pasting addresses in new tab/window (Playwright, read-only) | docs/KNOWLEDGE.md |
 | `845c266` | 2026-11-16 | Docs only: how the real portal session works (cookies, redirect chain, expired page) from read-only header probes | docs/KNOWLEDGE.md |
 | `d659750` | 2026-11-16 | Docs only: real-portal session behaviour verified with read-only probes (one session per account, expired-page shape, tab vs window) and the session-expiry gaps found by the mock probe | docs/KNOWLEDGE.md |
