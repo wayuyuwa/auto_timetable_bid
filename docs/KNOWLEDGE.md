@@ -3,7 +3,7 @@
 Living map of this repo so any person or agent can find what to edit quickly.
 **Rule: whenever code, config, tests or behaviour change, update this file in the same commit** (map, "where to edit", flows and the change log at the bottom). Every change-log row names its commit hash and files.
 
-Last updated: 2026-11-17 (session-expiry fixes, realistic mock).
+Last updated: 2026-11-17 (registration-not-open wait).
 
 ## What the app is
 
@@ -44,7 +44,8 @@ src/
   services/
     plan_runner.py              PlanRunner (the engine): login (+progress), scheduled start (login retry while the
                                 portal looks closed), bid plans, verify against UTAR's registered list, fallback
-                                A->B->C (auto/ask), retry loop, pre-flight steps (works without a plan).
+                                A->B->C (auto/ask), retry loop, pre-flight steps (works without a plan),
+                                _wait_until_open (waits while registration is closed, open_check_seconds = 2).
                                 StatusBoard + empty_status() = the status dict polled by the UI (incl. steps, log,
                                 login attempts, stopping, started_at/ended_at, error_source/error_kind).
     bidding_service.py          LEGACY single-list service (used by legacy PyQt GUI only)
@@ -63,7 +64,8 @@ src/
                                 _open() + _with_relogin() (SessionExpired, relogin once) around every read; register_course
                                 checks the registered list before re-sending a bid that may have gone through
     html_parser.py              Pure HTML parsing: student data, course values, home page,
-                                parse_registered_courses, parse_unit_slots, parse_time_range, sessions_clash
+                                parse_registered_courses, parse_unit_slots, parse_time_range, sessions_clash,
+                                registration_form_open (is the registration form on the page?)
     base_scraper.py             Abstract interface
   models/                       Course (code, name, slots), BidResult/BidStatus
   storage/database.py           Database + SettingsRepository, CourseRepository, PlanRepository
@@ -90,7 +92,9 @@ src/
                                 session (else the expired script page), cookie set at login.jsp (Path=/portal) and again after login
                                 (Path=/portal/courseRegStu), a 2nd login of the same student ends the 1st session, login redirects
                                 via indexSurvey.jsp?passid= (a 3rd visit -> login.jsp?message=notSupportTab and the session ends).
-                                Switches: server.require_session, single_session, session_timeout (idle seconds, default none;
+                                Switches: server.registration_open (False = closed like the real portal: no registration form;
+                                scenario registration-closed; reset_state sets it True), require_session, single_session,
+                                session_timeout (idle seconds, default none;
                                 the real value is not measured). reset_state keeps them. Not modelled: other real redirect hops.
                                 expire_next(server, page, mode, times) makes the next request(s) fail once (js / loginpage /
                                 hang / apply-then-js); server.hits and server.processed_submits count requests / bids processed.
@@ -108,6 +112,7 @@ web/
 tests/
   test_plan_runner.py           Engine unit tests (runner, verification, fallback, freeze/relogin regressions)
   test_mock_server.py           Mock server tests
+  test_registration_open.py     Registration closed: scraper check, wait then bid (both methods), Stop, flaky check, pre-flight
   test_session_expiry.py        Session expiry in BS and Playwright (expire_next rules): relogin, no double bid, give-up limits,
                                 a hung bid/lookup gives up at the timeout
   test_mock_sessions.py         The mock's sessions behave like the real portal (cookie, single session, passid/notSupportTab,
@@ -133,6 +138,7 @@ Not tracked / ignore: `src-tauri/` (leftover from the `tauri-rust` branch), `dis
 | Toast timing / queue                               | `showToast`, `TOAST_MS` in App.vue                           |
 | Login error panel / blocking Start                 | `handleFinished`, `LOGIN_TITLES`, `credentialsRejected` in App.vue; kinds from `scrapers/errors.py` |
 | Login retries, attempt count, delays               | `login`/`_login_once` (BS), `LOGIN_ATTEMPTS`/`login` (Playwright), `CLOSED_AFTER` |
+| Waiting for registration to open (interval, detection) | `PlanRunner.open_check_seconds`, `_wait_until_open`; `registration_form_open` (html_parser); `registration_open` in both scrapers |
 | Scheduled start / early login behaviour            | `_scheduled_login` (`prelogin_seconds`, `login_grace_seconds`, `login_retry_seconds`); UI `scheduledEpoch()` |
 | Pre-flight steps                                   | `PlanRunner.preflight` (`_steps_init`, `_step`) and `_preflight_checks` |
 | Saved credentials                                  | `DesktopApi.get_saved_credentials/save_credentials`, `utils/secret_store.py` |
@@ -161,9 +167,11 @@ Not tracked / ignore: `src-tauri/` (leftover from the `tauri-rust` branch), `dis
 
 **Run (Start):** App.vue `startRun()` → `DesktopApi.start()` → `_begin()` creates `StatusBoard` + `PlanRunner`, runs `PlanRunner.run` on a daemon thread → (optional `start_at`: logs in 60 s early, waits) → login → read registered list → skip already-registered → bid Plan A → verify against UTAR's registered list → missing courses fall back to next plan (`auto` adds non-clashing courses; `ask` sets phase `awaiting_choice` and waits for `DesktopApi.choose(codes)`) → retry every `auto_retry_seconds` up to `max_attempts` → `complete`/`error`/`cancelled`. UI polls `get_status()`.
 
-**Phases:** idle, login, scheduled, preflight, preflight_done, bidding, verifying, awaiting_choice, waiting_retry, complete, error, cancelled. `stopping=True` (with running) means Stop was pressed and the run is finishing its current call.
+**Phases:** idle, login, scheduled, preflight, preflight_done, waiting_open, bidding, verifying, awaiting_choice, waiting_retry, complete, error, cancelled. `stopping=True` (with running) means Stop was pressed and the run is finishing its current call.
 
 **Login errors (scrapers/errors.py → status.error_kind):** invalid_credentials (stop; UI blocks Start until the credentials change), account_not_allowed (password accepted but UTAR refuses the account: the real portal redirects to `login.jsp?message=notActive` "study status is not allowed..." or `notConsultAdviser`; `loginError` = wrong ID/password; stop, no retry, shows UTAR's red text), portal_closed (login accepted, then "session expired" = registration not open), portal_unavailable (no/odd response), browser_missing (Playwright Chromium not installed). error_source "login" shows the panel in Login & settings.
+
+**Registration not open yet (owner decision 2026-11-17: check every 2 s, wait until Stop, both methods):** at the start of every `_run_plans` pass `_wait_until_open` asks the scraper `registration_open(first course code)` (read only). BeautifulSoup posts the unit lookup, Playwright opens the registration page; both use `html_parser.registration_form_open` (unit box `reqUnit`, Register button or the hidden lookup fields). While it is False the phase is `waiting_open` (status `open_checks`, `last_check_at`), nothing is bid, no attempt is used, a failed check is logged once and tried again, Stop ends the wait; when the form appears the run goes on at once. Real portal while closed (2026-11-17): the registration page and the lookup answer only show the registered-courses form. This is the check the first release (v1.0.0 `fuck_utar.py`, Selenium releases up to v1.3.0) had as "Registration is not open yet" (missing Register button, relogin + reload forever); the Playwright migration dropped it. Pre-flight reports "Registration is open" / a warning and skips the class checks while closed. A scraper without `registration_open` is treated as open (never waits). Login-time "portal closed" in start-now mode still stops with the login error (unchanged).
 
 **Scheduled start (task 16 decision):** log in `prelogin_seconds` (60) before the start; if the portal looks closed/unreachable keep retrying the *login only* every 10 s until 180 s after the start (logging in never bids); at the start, `_refresh_registered` re-logs in once if the session expired. Bids are never retried blindly: every pass re-reads the registered list first. UI modes: now / at clock time / after N minutes (counted from clicking Start).
 
@@ -212,6 +220,7 @@ venv\Scripts\python -m src.mock_server --scenario closed   # run the mock by han
 venv\Scripts\python -m unittest tests/test_issue_fixes.py   # issues.txt features (uses the mock)
 venv\Scripts\python -m unittest tests/test_session_expiry.py   # session expiry, both scrapers (~100 s)
 venv\Scripts\python -m unittest tests/test_mock_sessions.py    # the mock's sessions match the real portal
+venv\Scripts\python -m unittest tests/test_registration_open.py   # registration closed: wait, then bid
 venv\Scripts\python main.py --test-real-server --student-id ID --prompt   # REAL portal, login + read only
 ```
 Last known: see docs/run-report.md (issues.txt run).
@@ -220,6 +229,7 @@ Last known: see docs/run-report.md (issues.txt run).
 ## Known gaps / open items
 
 - Group switch not automated (needs `changeClass.jsp` capture).
+- The open state of the real registration page has not been seen live since the registration-open check was added; detection (reqUnit box, Register button, hidden lookup fields) rests on the selectors from earlier real pages. If a real open page is judged "not open", a run would wait until Stop: compare with the portal and adjust `registration_form_open`.
 - Stress harness (`tests/stress/run_stress.py`) sets `single_session = False` on its mock: its concurrent phase logs several clients in as one student on purpose.
 - Session-expiry handling is proven on the mock (tests/test_session_expiry.py) and, for the Playwright registered-list relogin, on the real portal (2026-11-17). The real lookup and bid path could not be exercised: right after a normal login the real registration page had no `input#reqUnit` (registration probably not open for the account; unverified).
 - Registered-list parsing based on Dec 2023 page snapshots; not checked on the live "...Survey.jsp" flow.
@@ -238,6 +248,7 @@ hash is filled in by the next commit. Run `git log --oneline` for anything missi
 
 | Commit | Date | What changed | Files |
 |---|---|---|---|
+| (pending) | 2026-11-17 | Registration not open yet is handled again (it was lost in the Playwright migration; first release v1.0.0 had it): both methods look every 2 s until the registration form appears or Stop is pressed, nothing is bid and no attempt used while waiting; new phase `waiting_open` with check count/time in the UI; pre-flight reports it and skips class checks while closed. `registration_open()` in both scrapers, `registration_form_open` parser, mock switch `registration_open` + scenario `registration-closed`. New `tests/test_registration_open.py` (11) and 3 E2E cases `notopen_*` | src/scrapers/html_parser.py, src/scrapers/beautifulsoup_scraper.py, src/scrapers/playwright_scraper.py, src/services/plan_runner.py, src/mock_server.py, web/src/App.vue, tests/test_registration_open.py, tests/e2e/run_e2e.py, README.md, docs/KNOWLEDGE.md |
 | `9fa18e7` | 2026-11-17 | Fix a regression from `659c611` (also in the exe built from `8cf95dd`): a Playwright bid or lookup that timed out only gave up when the portal finally answered (30.5 s in the test instead of 3.3 s; Stop held up, stress showed 25 s cancel + 4 leaked browser processes). The session check after a timeout now reads only the page address. Mock now behaves like the real portal's sessions (cookie, 2nd login ends the 1st, passid/notSupportTab, optional idle timeout; switches require_session / single_session / session_timeout); old mock tests log in first; stress harness sets single_session=False. New `tests/test_mock_sessions.py` (15) and 2 hang tests in `tests/test_session_expiry.py` | src/scrapers/playwright_scraper.py, src/mock_server.py, tests/test_mock_sessions.py, tests/test_session_expiry.py, tests/test_mock_server.py, tests/stress/run_stress.py, README.md, .claude/skills/utar-verify/SKILL.md, docs/KNOWLEDGE.md |
 | `659c611` | 2026-11-17 | Session expiry fixed in both scrapers. Playwright: `_open`/`_with_relogin` give every read an expiry check and one relogin (cookies cleared); a bid answered with the expired page is no longer reported "Registered"; a bid that may have gone through is checked against the registered list before being re-sent. BS: a plain login page counts as an ended session on registration steps; relogin capped (3 per 60 s); `_submit_bidding` no longer relogs in and re-sends with old values; no automatic re-send after a timeout or unclear answer (outcome unknown); success flag no longer sticks at False after a retried read. Mock: `expire_next`, `hits`, `processed_submits`. New `tests/test_session_expiry.py` (22 tests). Verified on the real portal: Playwright registered-list relogin after cleared cookies | src/scrapers/beautifulsoup_scraper.py, src/scrapers/playwright_scraper.py, src/mock_server.py, tests/test_session_expiry.py, README.md, .claude/skills/utar-verify/SKILL.md, docs/KNOWLEDGE.md |
 | `69715db` | 2026-11-16 | Docs only: portal `notSupportTab` multi-tab check found by pasting addresses in new tab/window (Playwright, read-only) | docs/KNOWLEDGE.md |

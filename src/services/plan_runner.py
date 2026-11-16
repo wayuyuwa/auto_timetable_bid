@@ -71,6 +71,9 @@ def empty_status() -> dict:
         "preflight": None,
         "start_at": None,
         "next_retry_at": None,
+        # Waiting for registration to open: checks made so far and when the last one was (epoch s).
+        "open_checks": 0,
+        "last_check_at": None,
         # What is running: "run" or "preflight"; timers use started_at/ended_at (epoch s).
         "kind": "",
         "started_at": None,
@@ -196,6 +199,9 @@ class PlanRunner:
         # seconds after the start time while the portal looks closed/unreachable.
         self.login_grace_seconds = 180
         self.login_retry_seconds = 10
+        # While registration is closed (the portal shows no registration form) look again every
+        # open_check_seconds, until it opens or the user presses Stop. Reading only, never bids.
+        self.open_check_seconds = 2
         self._credentials = None
         self.board = board or StatusBoard()
         self._scraper_factory = scraper_factory
@@ -477,6 +483,45 @@ class PlanRunner:
             self._sleep_until(start_at)
         self.board.update(phase="verifying", next_retry_at=None, message="Starting: scheduled time reached.")
 
+    # ---- registration open?
+    def _first_course_code(self):
+        return next((course.code for plan in self.plans for course in plan["courses"]), None)
+
+    def _registration_open(self) -> bool:
+        check = getattr(self._scraper, "registration_open", None)
+        if check is None:
+            return True  # a scraper without the check: never wait for something it cannot tell
+        return bool(check(self._first_course_code()))
+
+    def _wait_until_open(self):
+        """Wait, until Stop, for the portal to take bids. Only reads: nothing is bid while waiting,
+        and waiting does not use up retry attempts. A failed check is logged and tried again."""
+        checks = 0
+        logged = set()
+        while True:
+            round_started = time.time()
+            self._check_cancel()
+            try:
+                is_open, problem = self._registration_open(), None
+            except Exception as error:  # noqa: BLE001
+                self._check_cancel()
+                is_open, problem = False, str(error) or type(error).__name__
+            checks += 1
+            if is_open:
+                if checks > 1:
+                    self.board.update(phase="verifying", message="Registration is open. Starting...")
+                return
+            if problem and problem not in logged:
+                logged.add(problem)
+                self.board.log(f"Could not check whether registration is open: {problem}", "warn")
+            wait = f"Checking again every {self.open_check_seconds:g}s. Press Stop to quit."
+            self.board.update(
+                phase="waiting_open", open_checks=checks, last_check_at=time.time(),
+                message=(f"Could not check whether registration is open. {wait}" if problem
+                         else f"Registration is not open yet. {wait} Nothing is bid while waiting."),
+            )
+            self._sleep_until(round_started + self.open_check_seconds)
+
     # ---- registered list
     def _refresh_registered(self, relogin=True) -> dict:
         """Read the registered-courses page; returns {code: registered_course}.
@@ -554,6 +599,7 @@ class PlanRunner:
 
     def _run_plans(self) -> bool:
         """One pass over the plans. True when some plan is fully registered."""
+        self._wait_until_open()
         self.board.update(phase="verifying", message="Reading your registered courses...")
         snapshot = self._refresh_registered()
 
@@ -734,6 +780,22 @@ class PlanRunner:
         if credit.get("total") or credit.get("max"):
             add("info", f"Credit hours registered: {credit.get('total') or '?'} of {credit.get('max') or '?'}.")
         self._step("registered", "ok", f"{len(snapshot)} course(s) registered at UTAR right now.")
+
+        try:
+            registration_is_open = self._registration_open()
+        except Exception as error:  # noqa: BLE001
+            self._check_cancel()
+            registration_is_open = None
+            add("warn", f"Could not tell whether registration is open ({error}).")
+        if registration_is_open:
+            add("ok", "Registration is open.")
+        elif registration_is_open is False:
+            add("warn", "Registration is not open yet. Start registration waits (checking every "
+                       f"{self.open_check_seconds:g}s) until it opens; Stop ends the wait.")
+            reason = "Registration is not open yet, so the classes cannot be checked."
+            self._step("plans", "skipped", reason)
+            self._step("clashes", "skipped", reason)
+            return checks
 
         if not self.plans:
             reason = "No course plan yet. Add or import courses to check them."

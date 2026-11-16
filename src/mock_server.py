@@ -51,6 +51,9 @@ def ensure_state(server):
         # Behaviour of the real portal (verified 2026-11-16, see docs/KNOWLEDGE.md): pages need the
         # JSESSIONID cookie of a logged-in session; a second login ends the first session.
         server.require_session = True
+        # False: like the real portal while registration is closed (checked 2026-11-17) the registration
+        # page and the unit lookup answer with the registered-courses page and no registration form.
+        server.registration_open = True
         server.single_session = True
         server.session_timeout = None  # idle seconds before a session ends; the real value is not measured
         server.hits = Counter()
@@ -66,6 +69,7 @@ def reset_state(server):
                  "sessions", "active_by_user", "passids"):
         getattr(server, name).clear()
     server.processed_submits = 0
+    server.registration_open = True
     return server
 
 
@@ -316,7 +320,7 @@ class MockHandler(BaseHTTPRequestHandler):
                 # "session expired" (what the real portal does outside the window).
                 self._send(SESSION_EXPIRED_PAGE)
             else:
-                self._send(self._home_page(base, unit_lookup=True))
+                self._send(self._home_page(base, unit_lookup=ensure_state(self.mock_server).registration_open))
         elif path == f"{base}/registration/registerCourse.jsp":
             self._send(self._home_page(base, register=True))
         else:
@@ -339,13 +343,18 @@ class MockHandler(BaseHTTPRequestHandler):
             else:
                 self._login_success(form.get("reqFregkey", ""))
         elif path == f"{base}/registration/registerUnitSurvey.jsp":
-            self._send(self._unit_page(form.get("reqUnit", "MOCK1001")))
+            if not ensure_state(self.mock_server).registration_open:
+                self._send(self._home_page(base))  # closed: no unit form, just the registered courses
+            else:
+                self._send(self._unit_page(form.get("reqUnit", "MOCK1001")))
         elif path == f"{base}/registration/registerUnitProSurvey.jsp":
             if self.mock_server.scenario == "timeout":
                 # The request hangs and is lost: nothing is registered, so runs
                 # stay deterministic however long the client waits.
                 time.sleep(self.mock_server.delay)
                 self._send("<div class='red'>Mock request timed out</div>")
+            elif not ensure_state(self.mock_server).registration_open:
+                self._send(self._home_page(base))  # closed: nothing is registered
             elif self.mock_server.scenario == "register-fail":
                 self._send("<div class='red'>Mock registration failed</div>")
             else:
@@ -480,7 +489,8 @@ def create_server(host="127.0.0.1", port=0, scenario="success", delay=15):
     server.base_path = "/portal/courseRegStu"
     server.scenario = scenario
     server.delay = delay
-    return ensure_state(server)
+    ensure_state(server).registration_open = scenario != "registration-closed"
+    return server
 
 
 def run_server(host, port, scenario, delay):
@@ -496,7 +506,8 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--scenario",
-        choices=("success", "register-fail", "timeout", "session-expired", "closed", "not-active", "not-adviser"),
+        choices=("success", "register-fail", "timeout", "session-expired", "closed", "not-active", "not-adviser",
+                 "registration-closed"),
         default="success",
     )
     parser.add_argument("--delay", type=float, default=15, help="Timeout scenario delay in seconds")

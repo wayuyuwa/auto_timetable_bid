@@ -38,6 +38,9 @@ An educational project demonstrating web scraping and automation techniques usin
     For a timed start the app logs in a minute early; if the portal still looks
     closed it keeps retrying only the login (never bidding) until shortly after
     the start time
+  - When registration is not open yet (the portal shows no registration form),
+    a run waits and looks again every 2 seconds until it opens, then bids at
+    once. Nothing is bid while waiting and Stop ends the wait
   - Pre-flight check: shows each step live (login, registered list, course
     checks, clashes) and verifies login, course codes, groups, availability and
     clashes without registering anything. Works without a course plan, to test
@@ -148,6 +151,9 @@ venv\Scripts\python -m unittest tests/test_session_expiry.py
 
 # The mock's sessions match the real portal (cookie, one session per account, tab vs window)
 venv\Scripts\python -m unittest tests/test_mock_sessions.py
+
+# Registration not open: waiting, then bidding (both methods), Stop, pre-flight
+venv\Scripts\python -m unittest tests/test_registration_open.py
 ```
 
 ### Real-server check (no bidding)

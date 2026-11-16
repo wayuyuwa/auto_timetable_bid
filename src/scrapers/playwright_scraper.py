@@ -34,7 +34,7 @@ from .errors import (
     PortalUnavailable,
     portal_rejection,
 )
-from .html_parser import parse_home_page, parse_registered_courses, parse_unit_slots
+from .html_parser import parse_home_page, parse_registered_courses, parse_unit_slots, registration_form_open
 
 logger = setup_logger(__name__)
 
@@ -412,6 +412,18 @@ class PlaywrightScraper:
             html = self.page.content()
             save_page(self.page, "registered-page")
             return {"courses": parse_registered_courses(html), "info": parse_home_page(html)}
+
+        return self._with_relogin(read)
+
+    @_on_owner_thread
+    def registration_open(self, unit_code=None) -> bool:
+        """True when the portal takes bids: its registration form (unit lookup box) is on the
+        registration page. Reads only, never bids. unit_code is accepted for the same call as the
+        BeautifulSoup scraper and not needed here."""
+
+        def read():
+            self._open(COURSE_REGISTRATION_URL)
+            return registration_form_open(self.page.content())
 
         return self._with_relogin(read)
 

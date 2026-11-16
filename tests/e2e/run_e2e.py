@@ -658,6 +658,62 @@ async ([name, content, selector]) => {
 """
 
 
+@case("notopen_01_waits_then_bids", "Registration not open: the app waits, then bids when it opens",
+      "Phase 'Waiting for registration to open' with a check count; nothing bid; opening lets the run finish")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    h.mock.registration_open = False
+    _start(h)
+    h.wait_phase("waiting_open", timeout=30)
+    h.page.get_by_text("Bidding starts as soon as it opens", exact=False).first.wait_for(timeout=10_000)
+    h.page.wait_for_timeout(2500)  # at least one more check at the 2 s interval
+    shot()
+    status = h.api.get_status()
+    check(status["running"] and status["phase"] == "waiting_open", f"status {status['phase']!r}")
+    check(status["open_checks"] >= 2, f"only {status['open_checks']} check(s)")
+    check(h.mock.registered == {} and h.mock.processed_submits == 0, "something was bid while closed")
+    h.mock.registration_open = True
+    status = h.wait_run_finished()
+    check(status["phase"] == "complete", f"phase {status['phase']!r}: {status['message']!r}")
+    check(status["attempt"] == 1, f"waiting used attempts: {status['attempt']}")
+    check("MOCK1001" in h.mock.registered, "course was not registered after it opened")
+
+
+@case("notopen_02_stop_ends_wait", "Registration not open, then Stop",
+      "Stop ends the wait within seconds; nothing bid; the app is usable again")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    h.mock.registration_open = False
+    _start(h)
+    h.wait_phase("waiting_open", timeout=30)
+    h.page.get_by_role("button", name="Stop safely").click()
+    stopped = time.time()
+    status = h.wait_run_finished(timeout=30)
+    shot()
+    check(status["phase"] == "cancelled", f"phase {status['phase']!r}: {status['message']!r}")
+    check(time.time() - stopped < 15, "Stop took too long")
+    check(h.mock.processed_submits == 0, "something was bid while closed")
+    h.page.get_by_role("button", name="Start registration").wait_for()
+
+
+@case("notopen_03_playwright_waits", "Registration not open (Playwright): waits, then bids",
+      "Same behaviour with the browser method")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    h.mock.registration_open = False
+    _start(h, "Playwright")
+    h.wait_phase("waiting_open", timeout=60)
+    h.page.wait_for_timeout(2500)
+    status = h.api.get_status()
+    check(status["running"] and status["open_checks"] >= 2, f"status {status['phase']!r} checks {status['open_checks']}")
+    check(h.mock.processed_submits == 0, "something was bid while closed")
+    h.mock.registration_open = True
+    status = h.wait_run_finished()
+    shot()
+    check(status["phase"] == "complete", f"phase {status['phase']!r}: {status['message']!r}")
+    check("MOCK1001" in h.mock.registered, "course was not registered after it opened")
+
+
 @case("ux_01_header_and_tabs", "Short header, no 'Desktop ready', section tabs",
       "Header is one short title; run status chip instead of the bridge pill; five tabs")
 def _(h, shot):

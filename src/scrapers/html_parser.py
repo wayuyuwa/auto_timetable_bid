@@ -54,6 +54,21 @@ def parse_home_page(html: str) -> dict:
     return data
 
 
+def registration_form_open(html: str) -> bool:
+    """True when the portal's registration form is on the page: the unit lookup box (input
+    reqUnit), the Register button, or the hidden fields of a unit lookup answer.
+
+    While registration is closed the registration page only shows the registered-courses form
+    (no reqUnit, no Register button; seen on the real portal 2026-11-17). The first release (v1.0.0)
+    used the missing Register button as its "registration is not open yet" signal.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    if soup.find("input", {"name": "reqUnit"}) or soup.find("input", {"name": "Register"}):
+        return True
+    return all(soup.find("input", {"name": name})
+               for name in ("reqPaperType", "reqSession", "reqSid", "reqWithClass"))
+
+
 # --------------------------------------------------------------------------
 # Registered-courses page ("My Course Registration") and unit slot page.
 # Structure taken from real UTAR pages:

@@ -27,6 +27,7 @@ from .html_parser import (
     parse_home_page,
     parse_registered_courses,
     parse_unit_slots,
+    registration_form_open,
 )
 
 # Disable SSL warnings
@@ -897,6 +898,30 @@ class BeautifulSoupScraper:
             return self.get_registered_courses()
         html = response.content.decode('utf-8', errors='ignore')
         return {"courses": parse_registered_courses(html), "info": parse_home_page(html)}
+
+    def registration_open(self, unit_code=None) -> bool:
+        """True when the portal takes bids: its registration form is there. Reads only, never bids.
+
+        With a unit code it asks the unit lookup (what bidding needs); without one it reads the
+        registration page. A session that ended is restored like in the other reads; if that is
+        not possible SessionExpiredException is raised.
+        """
+        self._check_cancellation()
+        try:
+            if unit_code:
+                response = self.session.post(
+                    REGISTRATION_URL, headers=self.headers, verify=False, timeout=self.connection_timeout,
+                    data={'reqPaperType': 'M', 'reqFregkey': '', 'reqUnit': unit_code, 'Save': 'View'})
+            else:
+                response = self.session.get(
+                    COURSE_REGISTRATION_URL, headers=self.headers, verify=False, timeout=self.connection_timeout)
+            self._check_session_expired(response, login_page_means_expired=True)
+        except SessionExpiredException:
+            if not self._try_relogin():
+                raise
+            return self.registration_open(unit_code)
+        return response.status_code == 200 and registration_form_open(
+            response.content.decode('utf-8', errors='ignore'))
 
     def get_unit_slots(self, unit_code: str) -> list:
         """Class slots offered for a unit (timing, availability, selectable)."""

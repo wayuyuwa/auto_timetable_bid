@@ -40,6 +40,8 @@ const status = reactive({
   preflight: null,
   start_at: null,
   next_retry_at: null,
+  open_checks: 0,
+  last_check_at: null,
   kind: "",
   started_at: null,
   ended_at: null,
@@ -120,7 +122,7 @@ const creditText = computed(() => {
 const PHASES = {
   idle: "Ready", login: "Logging in", scheduled: "Waiting for scheduled start", preflight: "Pre-flight",
   verifying: "Checking registered courses", bidding: "Bidding", awaiting_choice: "Waiting for your choice",
-  waiting_retry: "Waiting to retry", complete: "Done", preflight_done: "Pre-flight done",
+  waiting_retry: "Waiting to retry", waiting_open: "Waiting for registration to open", complete: "Done", preflight_done: "Pre-flight done",
   error: "Needs attention", cancelled: "Cancelled",
 };
 const phaseLabel = computed(() => (status.running && status.stopping ? "Stopping..." : PHASES[status.phase] || status.phase));
@@ -827,6 +829,7 @@ onUnmounted(() => {
         </div>
         <div class="progress-track"><span :style="{ width: `${status.total ? (status.completed / status.total) * 100 : 0}%` }"></span></div>
         <p v-if="status.running && status.phase === 'scheduled'" class="helper warn-text">Waiting for the scheduled start. Keep the app open and the computer awake.</p>
+        <p v-if="status.running && status.phase === 'waiting_open'" class="helper warn-text">Checked {{ status.open_checks }} time(s), last at {{ status.last_check_at ? formatTime(status.last_check_at) : '-' }}. Bidding starts as soon as it opens. Keep the app open and the computer awake.</p>
         <ul v-if="resultList.length" class="result-list">
           <li v-for="result in resultList" :key="result.code"><span class="course-code">{{ result.code }}</span><span class="row-status" :class="result.status">{{ result.label }}</span><span class="outcome-detail">{{ resultDetail(result) }}</span></li>
         </ul>
