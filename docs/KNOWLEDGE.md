@@ -3,7 +3,7 @@
 Living map of this repo so any person or agent can find what to edit quickly.
 **Rule: whenever code, config, tests or behaviour change, update this file in the same commit** (map, "where to edit", flows and the change log at the bottom). Every change-log row names its commit hash and files.
 
-Last updated: 2026-11-15 (Playwright wait times).
+Last updated: 2026-11-16 (session-expiry findings).
 
 ## What the app is
 
@@ -156,6 +156,8 @@ Not tracked / ignore: `src-tauri/` (leftover from the `tauri-rust` branch), `dis
 
 **Packaged exe and Playwright:** Playwright sets PLAYWRIGHT_BROWSERS_PATH=0 when frozen (looks inside the bundle). `browser_setup.configure_browsers_path()` points it at `%LOCALAPPDATA%\ms-playwright` instead; missing Chromium → BrowserMissing with an "Install browser" button (runs the bundled driver's `install chromium`).
 
+**Real-portal session behaviour (verified 2026-11-16, read-only probes):** one active session per account (a second login invalidates the first); a request without a valid session gets HTTP 200 with a short `sessionExpired` script (never a plain login page); a new tab in the same Playwright context stays logged in, a fresh context does not. Consequences: any parallel bidding (issue #3) must share one session/cookie jar, and an automatic relogin logs out every other window of the account.
+
 **Stop:** `DesktopApi.cancel()` → runner cancel → scraper cancel; watchdog marks the run cancelled after `STOP_GRACE_SECONDS` (25 s) if the worker hangs. BS cancel floor ~10 s is deliberate (avoid double-submitting a bid).
 
 **Releases (GitHub workflow):** job `build` (windows-latest, Python 3.10, Node 22) runs `build_exe.py`, fails if `dist\UnitRegTimetable\UnitRegTimetable.exe` is missing, zips the app folder + `config.ini` + `resources\` into `UnitRegTimetable.zip` and hands it to job `release` as an Actions artifact. That artifact is only a hand-over: GitHub deletes artifacts after the repo's retention period (90 days at most on a public repo), so it is not the permanent copy. Job `release` attaches the zip to a GitHub Release, which never expires.
@@ -193,6 +195,7 @@ Last known: see docs/run-report.md (issues.txt run).
 ## Known gaps / open items
 
 - Group switch not automated (needs `changeClass.jsp` capture).
+- Session-expiry gaps (mock probe 2026-11-16, no code changed yet): Playwright `get_unit_slots`, `register_course` and `get_home_page_data` have no expiry check (generic 3 s timeout, no relogin) and a Playwright submit answered with the expired page is reported "Registered" (the runner's registered-list check corrects it). BS `register_courses` re-sends a bid on its second pass after a timeout or unclear answer and returns success=False even when that pass registered the course; BS `_submit_bidding` has no cap on relogin+resubmit cycles. A plain login page instead of the expired page is not handled by either method, but the real portal was not seen doing that.
 - Registered-list parsing based on Dec 2023 page snapshots; not checked on the live "...Survey.jsp" flow.
 - BS submit check looks for `div.red`, real pages use `span.red` (alert-text detection partly covers it).
 - `README.zh.md` is behind `README.md`.
@@ -209,6 +212,7 @@ hash is filled in by the next commit. Run `git log --oneline` for anything missi
 
 | Commit | Date | What changed | Files |
 |---|---|---|---|
+| (pending) | 2026-11-16 | Docs only: real-portal session behaviour verified with read-only probes (one session per account, expired-page shape, tab vs window) and the session-expiry gaps found by the mock probe | docs/KNOWLEDGE.md |
 | `6697b7a` | 2026-11-15 | Playwright wait times shortened (owner request): long 10 -> 3 s, short 3 -> 1 s, very short default 1 -> 0.5 s | config.ini, src/utils/config.py, docs/KNOWLEDGE.md |
 | `4e08576` | 2026-11-15 | GitHub workflow: manual runs now also publish a permanent pre-release `build-<run number>` (before: only `v*` tags released; manual runs left an expiring artifact). Fails early when the exe or zip is missing; artifact holds only the zip; Node 22 set up explicitly; actions updated (checkout v4, setup-python v5, action-gh-release v2). `build_exe.py` exits 1 on a failed build (it always exited 0). README "Building and releases". Checked locally: YAML parse, packaging step dry run on a fake dist, unit tests + E2E. Proven on GitHub by tag `v1.4.0-beta` (run 12, success, zip attached); manual-run path not run yet | .github/workflows/build-and-release.yml, build_exe.py, README.md, docs/KNOWLEDGE.md |
 | `673e911` | 2026-11-14 | Exe rebuilt from `6424c57` (temp build + copy, VS Code lock); checked with --test-real-server on the mock (bs/playwright, success and not-active) and a GUI launch; results in docs/run-report.md | docs/run-report.md, docs/KNOWLEDGE.md |
