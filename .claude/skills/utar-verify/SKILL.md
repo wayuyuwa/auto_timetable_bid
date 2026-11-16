@@ -9,7 +9,7 @@ Read `docs/KNOWLEDGE.md` first for where things live. All commands run from the 
 
 ## 1. Unit tests (≈3 min, mock only; Playwright cases launch a browser)
 ```
-venv/Scripts/python -m unittest tests/test_session_expiry.py tests/test_issue_fixes.py tests/test_plan_runner.py tests/test_mock_server.py tests/test_utar_html_parser.py
+venv/Scripts/python -m unittest tests/test_mock_sessions.py tests/test_session_expiry.py tests/test_issue_fixes.py tests/test_plan_runner.py tests/test_mock_server.py tests/test_utar_html_parser.py
 ```
 - `test_utar_html_parser` skips itself when `F:\utar` (real saved pages) is missing. That is expected.
 - New tests that need the mock: `from tests.test_plan_runner import SERVER, RunnerCase, course, plan` **first**. That import sets `UTAR_BASE_URL`, `UTAR_MOCK_CAPTCHA` and a temp `UTAR_DEBUG_DIR` before `src.utils.config` loads.

@@ -3,13 +3,18 @@
 import argparse
 import os
 import re
+import secrets
 import threading
 import time
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-SESSION_EXPIRED_PAGE = "<script>window.parent.location.href='sessionExpired.jsp'</script>"
+# What the real portal answers when the session is missing or has ended (HTTP 200, short script;
+# verified 2026-11-16: it lands on .../courseRegStu/sessionExpiredSurvey.jsp).
+SESSION_EXPIRED_PAGE = "<script>window.parent.location.href='/portal/courseRegStu/sessionExpiredSurvey.jsp'</script>"
+# Pages that work without a logged-in session; every other page needs one.
+OPEN_PAGES = {"login.jsp", "Kaptcha.jpg", "loginProSurvey.jsp", "indexSurvey.jsp", "sessionExpiredSurvey.jsp"}
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 SLOT_TYPES = ("L", "T", "P")
 CLASH_MESSAGE = (
@@ -26,6 +31,9 @@ def ensure_state(server):
     slot_times   : {(code, type, group): (day, start_hour, hours)} overrides
     unknown_units: unit codes that return no slots
     expire_rules : {path suffix: {"mode", "times"}} one-shot failures, see expire_next()
+    sessions     : {JSESSIONID: {"user", "alive", "seen"}}; active_by_user: {student id: JSESSIONID}
+    passids      : {token: {"sid", "visits"}} one-time login addresses (indexSurvey.jsp?passid=)
+    require_session / single_session / session_timeout: how real the sessions are (see below)
     hits         : Counter of requests per page name (every request, answered or not)
     processed_submits: bids that really reached the registration logic
     """
@@ -37,6 +45,14 @@ def ensure_state(server):
         server.credits = {}
         server.max_credit = 20
         server.expire_rules = {}
+        server.sessions = {}
+        server.active_by_user = {}
+        server.passids = {}
+        # Behaviour of the real portal (verified 2026-11-16, see docs/KNOWLEDGE.md): pages need the
+        # JSESSIONID cookie of a logged-in session; a second login ends the first session.
+        server.require_session = True
+        server.single_session = True
+        server.session_timeout = None  # idle seconds before a session ends; the real value is not measured
         server.hits = Counter()
         server.processed_submits = 0
         server.state_lock = threading.Lock()
@@ -46,7 +62,8 @@ def ensure_state(server):
 def reset_state(server):
     """Forget registrations and overrides (use between test cases)."""
     ensure_state(server)
-    for name in ("registered", "full_slots", "slot_times", "unknown_units", "credits", "expire_rules", "hits"):
+    for name in ("registered", "full_slots", "slot_times", "unknown_units", "credits", "expire_rules", "hits",
+                 "sessions", "active_by_user", "passids"):
         getattr(server, name).clear()
     server.processed_submits = 0
     return server
@@ -121,6 +138,8 @@ PORTAL_MESSAGES = {
     "loginError": "Invalid Student ID or Password",
     "notActive": "Your study status is not allowed to access this system, please check with faculty officer",
     "notConsultAdviser": "You have not consulted your academic adviser. Please consult your adviser before registration",
+    # Seen as the address login.jsp?message=notSupportTab (2026-11-16); the wording is a stand-in.
+    "notSupportTab": "Multiple tabs or windows are not supported",
 }
 SCENARIO_REJECTIONS = {"not-active": "notActive", "not-adviser": "notConsultAdviser"}
 
@@ -135,13 +154,98 @@ class MockHandler(BaseHTTPRequestHandler):
     def mock_server(self):
         return self.server  # type: ignore[attr-defined]
 
-    def _send(self, body, status=200, content_type="text/html; charset=utf-8"):
+    def _send(self, body, status=200, content_type="text/html; charset=utf-8", cookies=(), location=None):
         encoded = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
+        if location:
+            self.send_header("Location", location)
+        for cookie in cookies:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _redirect(self, location, cookies=()):
+        self._send("", status=302, location=location, cookies=cookies)
+
+    def _session(self):
+        """(id, record) of the first live session named by a JSESSIONID cookie, else (None, None)."""
+        server = ensure_state(self.mock_server)
+        now = time.monotonic()
+        ids = [part.split("=", 1)[1].strip() for part in self.headers.get("Cookie", "").split(";")
+               if part.strip().startswith("JSESSIONID=")]
+        with server.state_lock:
+            for sid in ids:
+                record = server.sessions.get(sid)
+                if not record or not record["alive"]:
+                    continue
+                if server.session_timeout and now - record["seen"] > server.session_timeout:
+                    record["alive"] = False
+                    continue
+                record["seen"] = now
+                return sid, record
+        return None, None
+
+    def _blocked(self):
+        """True (after answering "session expired") when the page needs a logged-in session and has none."""
+        server = ensure_state(self.mock_server)
+        path = urlparse(self.path).path
+        if not server.require_session or path.rsplit("/", 1)[-1] in OPEN_PAGES:
+            return False
+        _sid, record = self._session()
+        if record is not None and record["user"]:
+            return False
+        if self.command == "POST":
+            self._form()  # read the body before answering
+        self._send(SESSION_EXPIRED_PAGE)
+        return True
+
+    def _login_success(self, user):
+        """Real behaviour: the session cookie is set again after login (scoped to the app folder),
+        a second login ends the first session, and the browser follows a one-time passid address."""
+        server = ensure_state(self.mock_server)
+        base = server.base_path
+        sid, record = self._session()
+        cookies = []
+        with server.state_lock:
+            if record is None:
+                sid = secrets.token_hex(20)
+                record = server.sessions[sid] = {"user": None, "alive": True, "seen": time.monotonic()}
+                cookies.append(f"JSESSIONID={sid}; Path=/portal; HttpOnly")
+            if server.single_session:
+                previous = server.active_by_user.get(user)
+                if previous and previous != sid and previous in server.sessions:
+                    server.sessions[previous]["alive"] = False
+            record["user"] = user
+            server.active_by_user[user] = sid
+            token = secrets.token_urlsafe(24)
+            server.passids[token] = {"sid": sid, "visits": 0}
+        cookies.append(f"JSESSIONID={sid}; Path={base}")
+        self._redirect(f"{base}/indexSurvey.jsp?passid={token}", cookies)
+
+    def _index_survey(self, token):
+        """indexSurvey.jsp?passid=<token>: two redirects right after login; opened again later (for
+        example pasted into a second tab) the portal refuses with login.jsp?message=notSupportTab and
+        the session behind the token ends too (verified 2026-11-16)."""
+        server = ensure_state(self.mock_server)
+        base = server.base_path
+        with server.state_lock:
+            entry = server.passids.get(token)
+            visits = 0
+            if entry is not None:
+                entry["visits"] += 1
+                visits = entry["visits"]
+                if visits > 2 and entry["sid"] in server.sessions:
+                    server.sessions[entry["sid"]]["alive"] = False
+        if entry is None:
+            self._send(SESSION_EXPIRED_PAGE)
+        elif visits == 1:
+            self._redirect(f"{base}/indexSurvey.jsp?passid={token}")
+        elif visits == 2:
+            self._redirect(f"{base}/registration/studentRegistrationSurvey.jsp")
+        else:
+            self._redirect(f"{base}/login.jsp?message=notSupportTab")
 
     def _form(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -177,11 +281,11 @@ class MockHandler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
-        if not self._gate():
+        if not self._gate() and not self._blocked():
             self._handle_get()
 
     def do_POST(self):
-        if not self._gate():
+        if not self._gate() and not self._blocked():
             self._handle_post()
 
     def _handle_get(self):
@@ -189,7 +293,20 @@ class MockHandler(BaseHTTPRequestHandler):
         base = self.mock_server.base_path
         if path == f"{base}/login.jsp":
             code = parse_qs(urlparse(self.path).query).get("message", [""])[0]
-            self._send(LOGIN_PAGE.format(tmp=int(time.time() * 1000), message=PORTAL_MESSAGES.get(code, "")))
+            cookies = []
+            sid, record = self._session()
+            if record is None:  # the portal hands out a session cookie with the login page
+                server = ensure_state(self.mock_server)
+                sid = secrets.token_hex(20)
+                with server.state_lock:
+                    server.sessions[sid] = {"user": None, "alive": True, "seen": time.monotonic()}
+                cookies.append(f"JSESSIONID={sid}; Path=/portal; HttpOnly")
+            self._send(LOGIN_PAGE.format(tmp=int(time.time() * 1000), message=PORTAL_MESSAGES.get(code, "")),
+                       cookies=cookies)
+        elif path == f"{base}/indexSurvey.jsp":
+            self._index_survey(parse_qs(urlparse(self.path).query).get("passid", [""])[0])
+        elif path == f"{base}/sessionExpiredSurvey.jsp":
+            self._send("<html><body>Your session has expired. Please log in again.</body></html>")
         elif path.endswith("/Kaptcha.jpg"):
             with open(CAPTCHA_IMAGE, "rb") as image:
                 self._send(image.read(), content_type="image/jpeg")
@@ -211,7 +328,7 @@ class MockHandler(BaseHTTPRequestHandler):
         form = self._form()
         if path == f"{base}/loginProSurvey.jsp":
             if self.mock_server.scenario == "session-expired":
-                self._send("<script>window.parent.location.href='sessionExpired.jsp'</script>")
+                self._send(SESSION_EXPIRED_PAGE)
             elif self.mock_server.scenario in SCENARIO_REJECTIONS:
                 # Real portal: the account is refused and the browser is sent
                 # back to the login page with a reason code.
@@ -220,7 +337,7 @@ class MockHandler(BaseHTTPRequestHandler):
             elif form.get("reqFregkey") == "invalid":
                 self._send("<div>Invalid Student ID or Password</div>")
             else:
-                self._send(self._home_page(base))
+                self._login_success(form.get("reqFregkey", ""))
         elif path == f"{base}/registration/registerUnitSurvey.jsp":
             self._send(self._unit_page(form.get("reqUnit", "MOCK1001")))
         elif path == f"{base}/registration/registerUnitProSurvey.jsp":

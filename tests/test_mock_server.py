@@ -7,6 +7,14 @@ import requests
 from src.mock_server import MockHandler
 
 
+def log_in(session, base_url, student_id="2103370"):
+    """Log in the way a browser does: login page (session cookie), then the form."""
+    session.get(f"{base_url}/login.jsp")
+    return session.post(f"{base_url}/loginProSurvey.jsp", data={
+        "preKap": "mock-prekap", "reqFregkey": student_id, "reqPassword": "pw", "kaptchafield": "mock",
+    })
+
+
 class MockServerTests(unittest.TestCase):
     def setUp(self):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)
@@ -27,6 +35,8 @@ class MockServerTests(unittest.TestCase):
         session = requests.Session()
         login = session.get(f"{self.base_url}/login.jsp")
         self.assertIn('form name="frmParam"', login.text)
+        landed = log_in(session, self.base_url)
+        self.assertIn("Log Out", landed.text)
 
         unit = session.post(
             f"{self.base_url}/registration/registerUnitSurvey.jsp",
@@ -37,7 +47,9 @@ class MockServerTests(unittest.TestCase):
 
     def test_register_fail_scenario_returns_failure_message(self):
         self.server.scenario = "register-fail"
-        response = requests.post(f"{self.base_url}/registration/registerUnitProSurvey.jsp")
+        session = requests.Session()
+        log_in(session, self.base_url)
+        response = session.post(f"{self.base_url}/registration/registerUnitProSurvey.jsp")
         self.assertIn("Mock registration failed", response.text)
 
 

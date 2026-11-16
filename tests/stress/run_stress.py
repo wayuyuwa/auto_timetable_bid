@@ -48,7 +48,7 @@ def log(msg):
 
 def start_mock():
     """Start the mock UTAR server in-process; return (server, base_url)."""
-    from src.mock_server import MockHandler
+    from src.mock_server import MockHandler, ensure_state
 
     class QuietHandler(MockHandler):
         def log_message(self, *args):
@@ -65,6 +65,9 @@ def start_mock():
     server.base_path = "/portal/courseRegStu"
     server.scenario = "success"
     server.delay = 30  # timeout-scenario delay (s); long enough to cancel mid-flight
+    # The real portal ends an account's older session on a new login. The concurrent phase logs
+    # several clients in as one student on purpose (load, not session rules), so allow that here.
+    ensure_state(server).single_session = False
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base_url = f"http://127.0.0.1:{server.server_port}{server.base_path}"
     return server, base_url

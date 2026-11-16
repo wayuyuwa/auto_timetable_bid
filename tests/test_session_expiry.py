@@ -72,13 +72,17 @@ class BeautifulSoupExpiryTests(RunnerCase):
         self.assertEqual(len(self.scraper.get_unit_slots("MOCK1001")), 9)
         self.assertEqual(SERVER.hits[LOGIN_POST], 1)
 
-    def test_login_form_answering_the_login_post_is_not_read_as_expiry(self):
-        # A wrong captcha also answers with the login form, so login keeps its own handling.
-        # Read as "session expired" it would count as a closed portal and log in a 2nd time.
-        expire_next(SERVER, LOGIN_POST, "loginpage")
-        result = self.scraper.login("2103370", "pw")
-        self.assertIn("success", result)
-        self.assertEqual(SERVER.hits[LOGIN_POST], 1)
+    def test_login_survives_a_login_page_answering_the_login_post(self):
+        # A wrong captcha also answers the login POST with the login form; login must try again,
+        # not give up. (A fresh scraper: the one from setUp is already logged in.)
+        fresh = BeautifulSoupScraper()
+        try:
+            expire_next(SERVER, LOGIN_POST, "loginpage")
+            result = fresh.login("2103370", "pw")
+            self.assertIn("success", result)
+            self.assertEqual(SERVER.hits[LOGIN_POST], 2)  # the first answer did not log in
+        finally:
+            fresh.cleanup()
 
     def test_bid_answered_with_expired_page_is_sent_again_once_after_login(self):
         expire_next(SERVER, SUBMIT, "js")
@@ -205,6 +209,23 @@ class PlaywrightExpiryTests(RunnerCase):
         self.assertFalse(ok)
         self.assertEqual(SERVER.hits[SUBMIT], 1)
         self.assertEqual(SERVER.processed_submits, 0)
+
+    def test_hung_bid_gives_up_at_the_timeout_not_when_the_portal_answers(self):
+        # Reading the page after a timeout used to wait for the pending request: a bid took as
+        # long as the portal's delay (30 s in the stress run) and Stop was held up with it.
+        with HangDelay(20):
+            expire_next(SERVER, SUBMIT, "hang")
+            started = time.time()
+            self.scraper.register_courses([WANTED])
+            self.assertLess(time.time() - started, 8)
+
+    def test_hung_lookup_gives_up_at_the_timeout_not_when_the_portal_answers(self):
+        with HangDelay(20):
+            expire_next(SERVER, UNIT, "hang")
+            started = time.time()
+            with self.assertRaises(Exception):
+                self.scraper.get_unit_slots("MOCK1001")
+            self.assertLess(time.time() - started, 8)
 
     def test_ended_session_that_cannot_be_restored_reports_expired(self):
         expire_next(SERVER, REG, "js", times=10)

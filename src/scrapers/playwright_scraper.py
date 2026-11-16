@@ -187,9 +187,20 @@ class PlaywrightScraper:
         self._check_cancellation()
 
     @classmethod
-    def _session_gone(cls, page) -> bool:
+    def _session_gone(cls, page, deep=True) -> bool:
         """The portal's expired page, or its plain login form (no "Log Out" link), is showing.
-        Only for registration pages: during login a login form can just mean a wrong captcha."""
+        Only for registration pages: during login a login form can just mean a wrong captcha.
+
+        deep=False looks at the address only. Use it after a timeout: reading the page then can
+        wait for a request the portal never answers (a bid that timed out took 30 s to give up
+        instead of 3 s, and Stop was held up with it)."""
+        try:
+            if "sessionExpired" in page.url:
+                return True
+        except PlaywrightError:
+            return False
+        if not deep:
+            return False
         if cls._looks_expired(page):
             return True
         try:
@@ -210,7 +221,8 @@ class PlaywrightScraper:
         timeout while waiting for a page element after the portal sent the expired page."""
         if isinstance(error, SessionExpired):
             return True
-        return isinstance(error, PlaywrightTimeoutError) and bool(self.page) and self._session_gone(self.page)
+        return (isinstance(error, PlaywrightTimeoutError) and bool(self.page)
+                and self._session_gone(self.page, deep=False))
 
     def _relogin(self):
         """Log in again after the portal ended the session (stale cookies cleared first)."""
@@ -490,12 +502,13 @@ class PlaywrightScraper:
         clicked.append(True)
         page.locator("input[name=Submit]").last.click()
         self._check_cancellation()
+        loaded = True
         try:
             # The portal reports failures in an alert on the result page.
             page.wait_for_load_state("domcontentloaded", timeout=WAIT_TIME_SHORT * 1000)
         except PlaywrightTimeoutError:
-            pass
-        if self._session_gone(page):
+            loaded = False  # still waiting for the answer: do not read the page (see _session_gone)
+        if self._session_gone(page, deep=loaded):
             # The answer to the bid is the expired page, not a result.
             self._is_logged_in = False
             raise SessionExpired("Session expired while submitting")

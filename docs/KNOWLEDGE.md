@@ -3,7 +3,7 @@
 Living map of this repo so any person or agent can find what to edit quickly.
 **Rule: whenever code, config, tests or behaviour change, update this file in the same commit** (map, "where to edit", flows and the change log at the bottom). Every change-log row names its commit hash and files.
 
-Last updated: 2026-11-17 (session-expiry fixes).
+Last updated: 2026-11-17 (session-expiry fixes, realistic mock).
 
 ## What the app is
 
@@ -86,6 +86,12 @@ src/
   mock_server.py                Local mock of the UTAR portal. Scenarios: success, register-fail, timeout,
                                 session-expired, closed, not-active, not-adviser (login refused with
                                 login.jsp?message=<code>). Serves the real sample Kaptcha.jpg.
+                                Sessions like the real portal (verified 2026-11-16): pages need the JSESSIONID cookie of a logged-in
+                                session (else the expired script page), cookie set at login.jsp (Path=/portal) and again after login
+                                (Path=/portal/courseRegStu), a 2nd login of the same student ends the 1st session, login redirects
+                                via indexSurvey.jsp?passid= (a 3rd visit -> login.jsp?message=notSupportTab and the session ends).
+                                Switches: server.require_session, single_session, session_timeout (idle seconds, default none;
+                                the real value is not measured). reset_state keeps them. Not modelled: other real redirect hops.
                                 expire_next(server, page, mode, times) makes the next request(s) fail once (js / loginpage /
                                 hang / apply-then-js); server.hits and server.processed_submits count requests / bids processed.
 
@@ -102,7 +108,10 @@ web/
 tests/
   test_plan_runner.py           Engine unit tests (runner, verification, fallback, freeze/relogin regressions)
   test_mock_server.py           Mock server tests
-  test_session_expiry.py        Session expiry in BS and Playwright (expire_next rules): relogin, no double bid, give-up limits
+  test_session_expiry.py        Session expiry in BS and Playwright (expire_next rules): relogin, no double bid, give-up limits,
+                                a hung bid/lookup gives up at the timeout
+  test_mock_sessions.py         The mock's sessions behave like the real portal (cookie, single session, passid/notSupportTab,
+                                tab vs window in a browser)
   test_utar_html_parser.py      Parser tests vs real saved pages; auto-skips if F:\utar is missing
   test_issue_fixes.py           issues.txt features: login kinds, scheduled login retry, preflight w/o plan, stopping,
                                 credentials, import modes, browser path, diagnostics, real-server CLI, process guard
@@ -170,7 +179,7 @@ How it works from the outside (headers only; no server source seen): Apache 2.4.
 
 **Multi-tab check (Playwright, real portal, 2026-11-16, read-only):** opening the one-time login address `indexSurvey.jsp?passid=<token>` in a second tab is answered with `login.jsp?message=notSupportTab`, and the original window's session is then dead too (expired page). Opening the plain `studentRegistrationSurvey.jsp` address in a new tab, or in a new browser context holding the same cookies, stays logged in; a context without the cookies gets the expired page. After login Playwright's address is `.../registration/studentRegistrationSurvey.jsp` (no `passid`). `notSupportTab` is not mapped in `scrapers/errors.py` (the app would show it as a generic "Portal sent the login back"). Not yet tested: lookups from two tabs at once, and what the owner's browser showed in the address bar when a pasted address logged them out (guess, unverified: the `passid` address, or a tab marker such as sessionStorage that a duplicated tab copies and a new window lacks).
 
-**Session expiry (both scrapers):** a read (registered list, home data, unit slots, class lookup) that gets the portal's expired page - or, new, a plain login page - logs in again once and repeats the read (BS: `_try_relogin`, capped at 3 per minute; Playwright: `_with_relogin`, cookies cleared first). A bid is never sent twice when it may have reached the portal: an expired answer to a bid is followed by a login, a look at the registered list (already there = done) and only then one more bid with freshly read values; a timeout, an unclear answer or an error leaves the bid unsent-again and reported as outcome unknown (the runner's registered-list check settles it). If the session cannot be restored both raise a message containing "expired" (Playwright `SessionExpired`, BS `SessionExpiredException`) and the runner's own relogin handles the rest.
+**Session expiry (both scrapers):** a read (registered list, home data, unit slots, class lookup) that gets the portal's expired page - or, new, a plain login page - logs in again once and repeats the read (BS: `_try_relogin`, capped at 3 per minute; Playwright: `_with_relogin`, cookies cleared first). A bid is never sent twice when it may have reached the portal: an expired answer to a bid is followed by a login, a look at the registered list (already there = done) and only then one more bid with freshly read values; a timeout, an unclear answer or an error leaves the bid unsent-again and reported as outcome unknown (the runner's registered-list check settles it). After a Playwright timeout only the page address is checked for the expired page (`_session_gone(deep=False)`): reading the page while the portal has not answered waits for that answer. If the session cannot be restored both raise a message containing "expired" (Playwright `SessionExpired`, BS `SessionExpiredException`) and the runner's own relogin handles the rest.
 
 **Stop:** `DesktopApi.cancel()` → runner cancel → scraper cancel; watchdog marks the run cancelled after `STOP_GRACE_SECONDS` (25 s) if the worker hangs. BS cancel floor ~10 s is deliberate (avoid double-submitting a bid).
 
@@ -202,6 +211,7 @@ venv\Scripts\python -m src.mock_server --scenario closed   # run the mock by han
 ```
 venv\Scripts\python -m unittest tests/test_issue_fixes.py   # issues.txt features (uses the mock)
 venv\Scripts\python -m unittest tests/test_session_expiry.py   # session expiry, both scrapers (~100 s)
+venv\Scripts\python -m unittest tests/test_mock_sessions.py    # the mock's sessions match the real portal
 venv\Scripts\python main.py --test-real-server --student-id ID --prompt   # REAL portal, login + read only
 ```
 Last known: see docs/run-report.md (issues.txt run).
@@ -210,6 +220,7 @@ Last known: see docs/run-report.md (issues.txt run).
 ## Known gaps / open items
 
 - Group switch not automated (needs `changeClass.jsp` capture).
+- Stress harness (`tests/stress/run_stress.py`) sets `single_session = False` on its mock: its concurrent phase logs several clients in as one student on purpose.
 - Session-expiry handling is proven on the mock (tests/test_session_expiry.py) and, for the Playwright registered-list relogin, on the real portal (2026-11-17). The real lookup and bid path could not be exercised: right after a normal login the real registration page had no `input#reqUnit` (registration probably not open for the account; unverified).
 - Registered-list parsing based on Dec 2023 page snapshots; not checked on the live "...Survey.jsp" flow.
 - BS submit check looks for `div.red`, real pages use `span.red` (alert-text detection partly covers it).
@@ -227,6 +238,7 @@ hash is filled in by the next commit. Run `git log --oneline` for anything missi
 
 | Commit | Date | What changed | Files |
 |---|---|---|---|
+| (pending) | 2026-11-17 | Fix a regression from `659c611` (also in the exe built from `8cf95dd`): a Playwright bid or lookup that timed out only gave up when the portal finally answered (30.5 s in the test instead of 3.3 s; Stop held up, stress showed 25 s cancel + 4 leaked browser processes). The session check after a timeout now reads only the page address. Mock now behaves like the real portal's sessions (cookie, 2nd login ends the 1st, passid/notSupportTab, optional idle timeout; switches require_session / single_session / session_timeout); old mock tests log in first; stress harness sets single_session=False. New `tests/test_mock_sessions.py` (15) and 2 hang tests in `tests/test_session_expiry.py` | src/scrapers/playwright_scraper.py, src/mock_server.py, tests/test_mock_sessions.py, tests/test_session_expiry.py, tests/test_mock_server.py, tests/stress/run_stress.py, README.md, .claude/skills/utar-verify/SKILL.md, docs/KNOWLEDGE.md |
 | `659c611` | 2026-11-17 | Session expiry fixed in both scrapers. Playwright: `_open`/`_with_relogin` give every read an expiry check and one relogin (cookies cleared); a bid answered with the expired page is no longer reported "Registered"; a bid that may have gone through is checked against the registered list before being re-sent. BS: a plain login page counts as an ended session on registration steps; relogin capped (3 per 60 s); `_submit_bidding` no longer relogs in and re-sends with old values; no automatic re-send after a timeout or unclear answer (outcome unknown); success flag no longer sticks at False after a retried read. Mock: `expire_next`, `hits`, `processed_submits`. New `tests/test_session_expiry.py` (22 tests). Verified on the real portal: Playwright registered-list relogin after cleared cookies | src/scrapers/beautifulsoup_scraper.py, src/scrapers/playwright_scraper.py, src/mock_server.py, tests/test_session_expiry.py, README.md, .claude/skills/utar-verify/SKILL.md, docs/KNOWLEDGE.md |
 | `69715db` | 2026-11-16 | Docs only: portal `notSupportTab` multi-tab check found by pasting addresses in new tab/window (Playwright, read-only) | docs/KNOWLEDGE.md |
 | `845c266` | 2026-11-16 | Docs only: how the real portal session works (cookies, redirect chain, expired page) from read-only header probes | docs/KNOWLEDGE.md |

@@ -145,6 +145,9 @@ venv\Scripts\python -m unittest tests/test_issue_fixes.py
 
 # Session expiry in both scrapers (relogin, no duplicate bids, give-up limits)
 venv\Scripts\python -m unittest tests/test_session_expiry.py
+
+# The mock's sessions match the real portal (cookie, one session per account, tab vs window)
+venv\Scripts\python -m unittest tests/test_mock_sessions.py
 ```
 
 ### Real-server check (no bidding)
