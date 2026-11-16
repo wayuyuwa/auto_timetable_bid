@@ -216,7 +216,7 @@ hash is filled in by the next commit. Run `git log --oneline` for anything missi
 
 | Commit | Date | What changed | Files |
 |---|---|---|---|
-| (pending) | 2026-11-16 | Docs only: portal `notSupportTab` multi-tab check found by pasting addresses in new tab/window (Playwright, read-only) | docs/KNOWLEDGE.md |
+| `69715db` | 2026-11-16 | Docs only: portal `notSupportTab` multi-tab check found by pasting addresses in new tab/window (Playwright, read-only) | docs/KNOWLEDGE.md |
 | `845c266` | 2026-11-16 | Docs only: how the real portal session works (cookies, redirect chain, expired page) from read-only header probes | docs/KNOWLEDGE.md |
 | `d659750` | 2026-11-16 | Docs only: real-portal session behaviour verified with read-only probes (one session per account, expired-page shape, tab vs window) and the session-expiry gaps found by the mock probe | docs/KNOWLEDGE.md |
 | `6697b7a` | 2026-11-15 | Playwright wait times shortened (owner request): long 10 -> 3 s, short 3 -> 1 s, very short default 1 -> 0.5 s | config.ini, src/utils/config.py, docs/KNOWLEDGE.md |
