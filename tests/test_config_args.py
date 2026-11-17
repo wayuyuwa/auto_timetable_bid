@@ -5,7 +5,9 @@
 
 import unittest
 
-from src.utils import config
+from tests.test_plan_runner import SERVER  # noqa: F401 - sets UTAR_BASE_URL (mock) before config is first imported
+
+from src.utils import config  # noqa: E402
 
 
 class ChromiumArgsTests(unittest.TestCase):

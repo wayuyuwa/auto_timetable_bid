@@ -154,6 +154,7 @@ venv\Scripts\python -m unittest tests/test_mock_sessions.py
 
 # Registration not open: waiting, then bidding (both methods), Stop, pre-flight
 venv\Scripts\python -m unittest tests/test_registration_open.py
+venv\Scripts\python -m unittest tests/test_multi_tab.py
 ```
 
 ### Real-server check (no bidding)

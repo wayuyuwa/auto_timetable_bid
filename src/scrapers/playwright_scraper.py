@@ -178,12 +178,13 @@ class PlaywrightScraper:
         self.page.set_default_timeout(WAIT_TIME_LONG * 1000)
         return self.page
 
-    def _goto(self, url: str):
+    def _goto(self, url: str, page=None):
         self._check_cancellation()
-        self._ensure_page().goto(url, wait_until="domcontentloaded")
+        page = page or self._ensure_page()
+        page.goto(url, wait_until="domcontentloaded")
         if on_mock():
             # Against the mock portal, keep a picture + HTML of every page visited.
-            save_page(self.page, "page-" + url.rstrip("/").rsplit("/", 1)[-1].split("?")[0])
+            save_page(page, "page-" + url.rstrip("/").rsplit("/", 1)[-1].split("?")[0])
         self._check_cancellation()
 
     @classmethod
@@ -209,10 +210,11 @@ class PlaywrightScraper:
         except PlaywrightError:
             return False
 
-    def _open(self, url: str):
-        """Go to a portal page; SessionExpired when the session has ended."""
-        self._goto(url)
-        if self._session_gone(self.page):
+    def _open(self, url: str, page=None):
+        """Go to a portal page (in `page`, default the main tab); SessionExpired when the session has ended."""
+        page = page or self._ensure_page()
+        self._goto(url, page)
+        if self._session_gone(page):
             self._is_logged_in = False
             raise SessionExpired("Session expired")
 
@@ -470,9 +472,10 @@ class PlaywrightScraper:
         clicked.clear()
         return self._register_once(course, clicked)
 
-    def _register_once(self, course: Course, clicked: list) -> tuple[str, bool]:
-        self._open(COURSE_REGISTRATION_URL)
-        page = self.page
+    def _prepare_bid(self, page, course: Course):
+        """Open the registration page in `page`, look the unit up and tick the wanted groups.
+        None when ready to submit, else the reason it cannot be bid."""
+        self._open(COURSE_REGISTRATION_URL, page)
         page.locator("table#tblGrid").wait_for(state="visible")
         page.locator("input#reqUnit[name=reqUnit]").fill(course.code)
         page.locator("input#reqUnit[name=reqUnit]").press("Enter")
@@ -502,8 +505,13 @@ class PlaywrightScraper:
 
         required_types = {key for key, slots in course.slots.items() if slots}
         if set(selected) != required_types:
-            return f"No available slots for {course.code}", False
+            return f"No available slots for {course.code}"
+        return None
 
+    @staticmethod
+    def _click_submit(page, wait=True) -> list:
+        """Click Submit (accepting the portal's alert). wait=False returns at once without waiting for
+        the answer (several tabs). Returns the list the alert text will be put in."""
         dialog_message = []
 
         def handle_dialog(dialog):
@@ -511,8 +519,12 @@ class PlaywrightScraper:
             dialog.accept()
 
         page.once("dialog", handle_dialog)
-        clicked.append(True)
-        page.locator("input[name=Submit]").last.click()
+        page.locator("input[name=Submit]").last.click(no_wait_after=not wait)
+        return dialog_message
+
+    def _bid_answer(self, page, course: Course, dialog_message: list, strict=False) -> tuple[str, bool]:
+        """Read the portal's answer to a submitted bid (the alert text, or the expired page).
+        strict: no answer in time is a timeout error (a click that waited would have raised one)."""
         self._check_cancellation()
         loaded = True
         try:
@@ -524,6 +536,8 @@ class PlaywrightScraper:
             # The answer to the bid is the expired page, not a result.
             self._is_logged_in = False
             raise SessionExpired("Session expired while submitting")
+        if strict and not loaded and not dialog_message:
+            raise PlaywrightTimeoutError(f"The portal did not answer the bid for {course.code} in time")
         message = dialog_message[0] if dialog_message else ""
         save_page(page, f"register-result-{course.code}")
         if "valid class combination" in message.lower():
@@ -531,6 +545,116 @@ class PlaywrightScraper:
         if "failed" in message.lower():
             return message, False
         return f"Registered {course.code}", True
+
+    def _register_once(self, course: Course, clicked: list) -> tuple[str, bool]:
+        page = self._ensure_page()
+        failure = self._prepare_bid(page, course)
+        if failure:
+            return failure, False
+        clicked.append(True)
+        dialog_message = self._click_submit(page)
+        return self._bid_answer(page, course, dialog_message)
+
+    # ---- several tabs (option): the bids are sent together, one tab each, in the same login
+    def _extra_tab(self):
+        self._check_cancellation()
+        page = self.context.new_page()
+        page.set_default_timeout(WAIT_TIME_LONG * 1000)
+        return page
+
+    @staticmethod
+    def _close_tabs(pages):
+        for page in pages:
+            try:
+                page.close()
+            except PlaywrightError:
+                pass
+
+    @_on_owner_thread
+    def check_tabs(self, count: int) -> tuple[bool, str]:
+        """Read-only: open the registration page in `count` tabs of this login and see that the portal
+        keeps the session in all of them (and in the first tab afterwards). (ok, what was seen)."""
+        self._ensure_page()
+        extra = []
+        try:
+            for number in range(2, count + 1):
+                tab = self._extra_tab()
+                extra.append(tab)
+                try:
+                    self._open(COURSE_REGISTRATION_URL, tab)
+                except SessionExpired:
+                    return False, f"Tab {number} was logged out by the portal."
+                if "notSupportTab" in tab.url:
+                    return False, f"The portal refused tab {number} (multiple tabs not supported)."
+            try:
+                self._open(COURSE_REGISTRATION_URL)
+            except SessionExpired:
+                return False, "The first tab was logged out when the other tabs opened."
+            return True, f"{count} tabs stayed logged in."
+        finally:
+            self._close_tabs(extra)
+
+    def _tab_failed(self, tab, error) -> bool:
+        """True when `error` means the session ended (else it is an ordinary failure of that bid)."""
+        return isinstance(error, SessionExpired) or (
+            isinstance(error, PlaywrightTimeoutError) and self._session_gone(tab, deep=False))
+
+    @_on_owner_thread
+    def register_batch(self, courses: list[Course]) -> list[tuple[str, bool]]:
+        """Bid several courses at the same moment, one tab each: every tab looks its unit up and ticks
+        its groups, then all Submit buttons are clicked one after the other and the answers read.
+        One (message, success) per course, in order. A bid that may have reached the portal is never
+        sent again before the registered list was read (same rule as register_course)."""
+        results = {}
+        extra = []
+        expired = False
+        try:
+            tabs = []
+            for index in range(len(courses)):
+                tabs.append(self._ensure_page() if index == 0 else self._extra_tab())
+                if index:
+                    extra.append(tabs[-1])
+            ready = []
+            for course, tab in zip(courses, tabs):
+                self._check_cancellation()
+                try:
+                    failure = self._prepare_bid(tab, course)
+                except (SessionExpired, PlaywrightTimeoutError, PlaywrightError) as error:
+                    if self._tab_failed(tab, error):
+                        expired = True
+                        break
+                    results[course.code] = (f"Registration error: {error}", False)
+                    continue
+                if failure:
+                    results[course.code] = (failure, False)
+                else:
+                    ready.append((course, tab))
+            if not expired:  # nothing is sent once a tab found the session ended
+                sent = []
+                for course, tab in ready:
+                    self._check_cancellation()
+                    sent.append((course, tab, self._click_submit(tab, wait=False)))
+                for course, tab, dialog_message in sent:
+                    try:
+                        results[course.code] = self._bid_answer(tab, course, dialog_message, strict=True)
+                    except (SessionExpired, PlaywrightTimeoutError, PlaywrightError) as error:
+                        if self._tab_failed(tab, error):
+                            expired = True
+                            break
+                        results[course.code] = (f"Registration error: {error}", False)
+        finally:
+            self._close_tabs(extra)
+        if expired:
+            self._relogin()
+            registered = self._registered_codes()
+            for course in courses:
+                if course.code in results:
+                    continue
+                if course.code in registered:
+                    results[course.code] = (f"Registered {course.code}", True)
+                else:
+                    results[course.code] = self.register_course(course)  # one tab, with its own safeguards
+        return [results[course.code] for course in courses]
 
     @_on_owner_thread
     def register_courses(self, courses: list[Course]) -> tuple[str, bool]:

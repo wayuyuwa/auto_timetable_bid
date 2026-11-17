@@ -181,6 +181,9 @@ def create_scraper(method: str, headless: bool):
 
 # ------------------------------------------------------------------- runner
 
+MAX_TABS = 5  # browser tabs that may bid together
+
+
 class PlanRunner:
     """One registration (or pre-flight) run over an ordered list of plans."""
 
@@ -194,6 +197,9 @@ class PlanRunner:
         self.auto_retry_seconds = max(0, int(options.get("auto_retry_seconds") or 0))
         self.max_attempts = max(0, int(options.get("max_attempts") or 0))
         self.start_at = options.get("start_at") or None  # epoch seconds
+        # Browser tabs bidding together (Playwright only; 1 = one course after another).
+        self.tabs = max(1, min(MAX_TABS, int(options.get("tabs") or 1))) if method == "Playwright" else 1
+        self._tabs_asked = max(1, min(MAX_TABS, int(options.get("tabs") or 1)))
         self.prelogin_seconds = 60
         # Scheduled runs: keep retrying login (never bidding) until this many
         # seconds after the start time while the portal looks closed/unreachable.
@@ -347,12 +353,15 @@ class PlanRunner:
         login and registered-list checks run and the plan checks are skipped."""
         final = None
         self._mark_started("preflight")
-        self._steps_init([
+        steps = [
             ("login", "Log in to the portal"),
             ("registered", "Read your registered courses"),
             ("plans", "Check course codes, groups and free places"),
             ("clashes", "Check your first choices for clashes"),
-        ])
+        ]
+        if self.tabs > 1:
+            steps.insert(2, ("tabs", f"Check {self.tabs} browser tabs on one login"))
+        self._steps_init(steps)
         try:
             self._step("login", "running")
             self._login(student_id, password)
@@ -644,6 +653,24 @@ class PlanRunner:
     def _bid(self, plan_name: str, targets):
         self._total += len(targets)
         self.board.update(total=self._total)
+        batch = getattr(self._scraper, "register_batch", None)
+        if self.tabs > 1 and batch is not None:
+            for start in range(0, len(targets), self.tabs):
+                group = targets[start:start + self.tabs]
+                self._check_cancel()
+                self.board.update(
+                    phase="bidding", completed=self._done,
+                    message=f"{plan_name}: bidding {', '.join(c.code for c in group)} together "
+                            f"({len(group)} tab(s))",
+                )
+                try:
+                    answers = batch(group)
+                except Exception as error:  # noqa: BLE001
+                    self._check_cancel()
+                    answers = [(str(error), False)] * len(group)
+                for course, (text, success) in zip(group, answers):
+                    self._record_bid(plan_name, course, text, success)
+            return
         for course in targets:
             self._check_cancel()
             self.board.update(
@@ -656,14 +683,17 @@ class PlanRunner:
             except Exception as error:  # noqa: BLE001
                 self._check_cancel()
                 text, success = str(error), False
-            if not success:
-                self._check_cancel()  # a stop mid-request is a cancel, not a failure
-            self._done += 1
-            if success:
-                self._record(plan_name, course, "success", "Submitted", "Submitted; verifying...")
-            else:
-                self._record(plan_name, course, "failed", "Needs attention", short_reason(text))
-            self.board.update(completed=self._done)
+            self._record_bid(plan_name, course, text, success)
+
+    def _record_bid(self, plan_name: str, course: Course, text: str, success: bool):
+        if not success:
+            self._check_cancel()  # a stop mid-request is a cancel, not a failure
+        self._done += 1
+        if success:
+            self._record(plan_name, course, "success", "Submitted", "Submitted; verifying...")
+        else:
+            self._record(plan_name, course, "failed", "Needs attention", short_reason(text))
+        self.board.update(completed=self._done)
 
     # ---- fallback
     def _occupied(self, snapshot: dict) -> list:
@@ -784,6 +814,32 @@ class PlanRunner:
         return set(self._choice or [])
 
     # ---- pre-flight
+    def _preflight_tabs(self, add):
+        """The several-tabs option: tabs of one login must all stay logged in (read-only check)."""
+        if self._tabs_asked > 1 and self.method != "Playwright":
+            add("warn", f"{self._tabs_asked} tabs were chosen, but tabs only work with the Playwright method. "
+                        "This run will bid one course after another.")
+            return
+        if self.tabs <= 1:
+            return
+        if getattr(self._scraper, "check_tabs", None) is None:
+            add("warn", "This connection cannot bid in several tabs; it will bid one course after another.")
+            self._step("tabs", "skipped", "Not supported by this connection.")
+            return
+        self._step("tabs", "running")
+        self.board.update(message=f"Pre-flight: opening {self.tabs} tabs on one login...")
+        try:
+            ok, detail = self._scraper.check_tabs(self.tabs)
+        except Exception as error:  # noqa: BLE001
+            self._check_cancel()
+            ok, detail = False, f"could not check ({error})"
+        if ok:
+            add("ok", f"{self.tabs} browser tabs stay logged in together.")
+            self._step("tabs", "ok", detail)
+        else:
+            add("warn", f"Several tabs may not work: {detail} Use 1 tab if bids fail.")
+            self._step("tabs", "warn", detail)
+
     def _preflight_checks(self) -> list:
         checks = []
 
@@ -797,6 +853,8 @@ class PlanRunner:
         if credit.get("total") or credit.get("max"):
             add("info", f"Credit hours registered: {credit.get('total') or '?'} of {credit.get('max') or '?'}.")
         self._step("registered", "ok", f"{len(snapshot)} course(s) registered at UTAR right now.")
+
+        self._preflight_tabs(add)
 
         try:
             registration_is_open = self._registration_open()

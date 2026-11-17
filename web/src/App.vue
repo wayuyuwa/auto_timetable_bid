@@ -57,6 +57,7 @@ const showPassword = ref(false);
 const options = reactive({
   method: "BeautifulSoup",
   browserVisible: true,
+  tabs: 1,
   fallbackMode: "auto",
   autoRetry: false,
   retrySeconds: 30,
@@ -522,6 +523,7 @@ async function startRun() {
     fallback_mode: options.fallbackMode,
     auto_retry_seconds: options.autoRetry ? Number(options.retrySeconds) || 0 : 0,
     max_attempts: options.autoRetry ? Number(options.maxAttempts) || 0 : 0,
+    tabs: options.method === "Playwright" ? Number(options.tabs) || 1 : 1,
     start_at: scheduledEpoch(),
   };
   try {
@@ -540,7 +542,8 @@ async function runPreflight() {
   if (!credentialsReady()) return;
   try {
     loginError.value = null;
-    await callApi("preflight", credentials.studentId, credentials.password, options.method, !options.browserVisible);
+    await callApi("preflight", credentials.studentId, credentials.password, options.method, !options.browserVisible,
+      { tabs: options.method === "Playwright" ? Number(options.tabs) || 1 : 1 });
     activeTab.value = "preflight";
     setNotice(totalCourses.value
       ? "Pre-flight check started. Nothing will be registered."
@@ -583,6 +586,7 @@ const LOGIN_TITLES = {
   portal_unavailable: "The portal did not respond properly",
   browser_missing: "The Playwright browser is not installed",
   account_not_allowed: "UTAR refused this account",
+  multiple_tabs: "UTAR ended the session: the account is open in another tab or window",
   login: "Login failed",
 };
 
@@ -787,6 +791,11 @@ onUnmounted(() => {
         <label v-if="options.startMode === 'at'">Bidding opens at<input v-model="options.startTime" type="time" step="1" /></label>
         <label v-if="options.startMode === 'after'">Start after (minutes)<input v-model.number="options.delayMinutes" type="number" min="1" step="1" /></label>
         <p v-if="scheduledHint" class="helper warn-text">{{ scheduledHint }}</p>
+
+        <template v-if="options.method === 'Playwright'">
+          <label>Browser tabs bidding together<select v-model.number="options.tabs"><option :value="1">1 (one course after another)</option><option v-for="n in [2, 3, 4, 5]" :key="n" :value="n">{{ n }} tabs</option></select></label>
+          <p v-if="options.tabs > 1" class="helper">Several courses are bid at the same moment, one tab each, on the same login. Run the pre-flight check first: it tests that the portal keeps all tabs logged in.</p>
+        </template>
 
         <label>If a plan cannot be completed<select v-model="options.fallbackMode"><option value="auto">Use the next plan automatically</option><option value="ask">Ask me what to bid first</option></select></label>
         <label class="toggle-label"><span>Retry until registered</span><input v-model="options.autoRetry" type="checkbox" /><span class="toggle"></span></label>

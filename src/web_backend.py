@@ -232,14 +232,16 @@ class DesktopApi:
         """Start a registration run.
 
         options: fallback_mode ("auto" | "ask"), auto_retry_seconds, max_attempts,
+        tabs (1-5 browser tabs bidding together, Playwright only),
         start_at (epoch seconds for a scheduled start). Courses that are already
         registered are skipped, so starting again retries only what is missing.
         """
         return self._begin(method, headless, options, "run", student_id, password, "Preparing login...")
 
-    def preflight(self, student_id, password, method="BeautifulSoup", headless=False):
-        """Check credentials, course codes, groups, availability and clashes without bidding."""
-        return self._begin(method, headless, None, "preflight", student_id, password,
+    def preflight(self, student_id, password, method="BeautifulSoup", headless=False, options=None):
+        """Check credentials, course codes, groups, availability and clashes without bidding.
+        options: only `tabs` is used (the several-tabs check)."""
+        return self._begin(method, headless, options, "preflight", student_id, password,
                            "Preparing pre-flight check...", kind="preflight")
 
     def choose(self, codes):

@@ -46,13 +46,22 @@ class AccountNotAllowed(LoginError):
     kind = "account_not_allowed"
 
 
+class MultipleTabs(LoginError):
+    """The portal saw this account in a second tab/window (login.jsp?message=notSupportTab) and ended
+    the session. Close the other portal tab or window; retrying while it is open fails again."""
+
+    kind = "multiple_tabs"
+
+
 # login.jsp?message=<code> redirects seen on the real portal.
 REJECTION_CODES = {"notActive", "notConsultAdviser"}
+MULTIPLE_TABS_CODES = {"notSupportTab"}
 INVALID_CREDENTIAL_CODES = {"loginError"}
 FALLBACK_TEXT = {
     "notActive": "Your study status is not allowed to access this system, please check with faculty officer",
     "notConsultAdviser": "The portal requires you to consult your academic adviser before registration",
     "loginError": "Invalid Student ID or Password",
+    "notSupportTab": "Multiple tabs or windows are not supported",
 }
 
 
@@ -66,6 +75,10 @@ def portal_rejection(code: str, portal_text: str):
     if code in REJECTION_CODES:
         return AccountNotAllowed(f"UTAR refused this account: \"{text or code}\" (code {code}). "
                                  "This is decided by UTAR, not the app; retrying will not help until it is resolved.")
+    if code in MULTIPLE_TABS_CODES:
+        return MultipleTabs(f"UTAR says \"{text or code}\" (code {code}): this account is open in another browser "
+                            "tab or window, which ended the session. Close the other UTAR portal tabs and windows "
+                            "(on any browser), then start again.")
     return None
 
 

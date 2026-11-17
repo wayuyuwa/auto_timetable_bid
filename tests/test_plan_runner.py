@@ -327,16 +327,19 @@ class RegistrationClosedTests(RunnerCase):
         super().setUp()
         SERVER.scenario = "closed"
 
-    def test_run_ends_with_login_error_instead_of_hanging(self):
-        started = time.time()
+    def test_run_keeps_waiting_while_the_portal_expires_the_session_and_stop_ends_it(self):
         runner, thread = self.start_in_thread([plan("Plan A", course("MOCK1001", L=[1]))])
-        thread.join(timeout=60)
-        self.assertFalse(thread.is_alive(), "run hung when the portal kept expiring the session")
+        runner.closed_login_retry_seconds = 0.5
+        deadline = time.time() + 40
+        while "nothing has been bid" not in runner.board.snapshot()["message"] and time.time() < deadline:
+            time.sleep(0.1)
         status = runner.board.snapshot()
-        self.assertEqual(status["phase"], "error")
-        self.assertIn("Login", status["message"])
-        self.assertIn("registration may be closed", status["message"])
-        self.assertLess(time.time() - started, 45)
+        self.assertTrue(status["running"], "the run must wait for registration to open")
+        self.assertIn("nothing has been bid", status["message"])
+        runner.cancel()
+        thread.join(timeout=30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(runner.board.snapshot()["phase"], "cancelled")
 
     def test_preflight_ends_instead_of_hanging(self):
         runner = PlanRunner([plan("Plan A", course("MOCK1001", L=[1]))], board=StatusBoard())

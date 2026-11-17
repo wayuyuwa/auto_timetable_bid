@@ -607,15 +607,9 @@ def _(h, shot):
 
 
 @case("closed_01_registration_closed", "Portal closed: session expires right after login",
-      "Run ends with a clear login error instead of hanging")
+      "Run keeps trying the login (nothing bid) until Stop; it does not end with an error")
 def _(h, shot):
-    h.open_app(courses=[COURSE_A], scenario="closed")
-    _start(h)
-    status = h.wait_run_finished(timeout=60)
-    shot()
-    check(status["phase"] == "error", f"phase {status['phase']!r}")
-    check("registration may be closed" in status["message"], f"message {status['message']!r}")
-    h.page.get_by_role("button", name="Start registration").wait_for()
+    _login_wait_case("BeautifulSoup", "closed")(h, shot)
 
 
 @case("closed_02_stop_while_login_fails", "Scheduled start while the portal is closed, then Stop",
@@ -712,6 +706,41 @@ def _(h, shot):
     shot()
     check(status["phase"] == "complete", f"phase {status['phase']!r}: {status['message']!r}")
     check("MOCK1001" in h.mock.registered, "course was not registered after it opened")
+
+
+@case("tabs_01_option_only_for_playwright", "Browser tabs option",
+      "The tabs choice shows only with Playwright; 2 tabs bid both courses; pre-flight tests the tabs")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A, COURSE_B])
+    h.fill_credentials()
+    h.choose_method("BeautifulSoup")
+    check(h.page.get_by_label("Browser tabs bidding together").count() == 0, "tabs option shown for BeautifulSoup")
+    h.choose_method("Playwright")
+    h.page.get_by_label("Browser tabs bidding together").select_option("2")
+    h.page.get_by_text("Several courses are bid at the same moment", exact=False).wait_for(timeout=5_000)
+    shot()
+    h.page.get_by_role("button", name="Start registration").click()
+    status = h.wait_run_finished()
+    check(status["phase"] == "complete", f"phase {status['phase']!r}: {status['message']!r}")
+    check({"MOCK1001", "MOCK1002"} <= set(h.mock.registered), f"registered {sorted(h.mock.registered)}")
+    check(h.mock.processed_submits == 2, f"submits {h.mock.processed_submits}")
+
+
+@case("tabs_02_preflight_checks_tabs", "Pre-flight with 3 tabs",
+      "A 'Check 3 browser tabs' step is shown and passes; nothing registered")
+def _(h, shot):
+    h.open_app(courses=[COURSE_A])
+    h.fill_credentials()
+    h.choose_method("Playwright")
+    h.page.get_by_label("Browser tabs bidding together").select_option("3")
+    h.page.get_by_role("button", name="Run pre-flight check").click()
+    status = h.wait_run_finished()
+    h.page.get_by_text("Check 3 browser tabs on one login").wait_for(timeout=10_000)
+    shot()
+    check(status["phase"] == "preflight_done", f"phase {status['phase']!r}: {status['message']!r}")
+    states = {step["id"]: step["state"] for step in status["steps"]}
+    check(states.get("tabs") == "ok", f"steps {states}")
+    check(h.mock.registered == {}, "pre-flight must not bid")
 
 
 @case("ux_01_header_and_tabs", "Short header, no 'Desktop ready', section tabs",
@@ -984,6 +1013,24 @@ def _run_case(method, scenario, student_id, expect_phase, expect_text=None, expe
     return body
 
 
+def _login_wait_case(method, scenario):
+    """The portal accepts the login and ends the session (closed): the run keeps trying, bids nothing,
+    and Stop ends it (owner decision 2026-11-17)."""
+    def body(h, shot):
+        h.open_app(courses=[MOCK_COURSE], scenario=scenario)
+        h.fill_credentials()
+        h.choose_method(method)
+        h.page.get_by_role("button", name="Start registration").click()
+        h.page.locator(".current-message", has_text="Trying again in").wait_for(timeout=60_000)
+        check(h.api.get_status()["running"], "the run must keep waiting")
+        check(h.mock.registered == {}, "something was bid while the portal was closed")
+        shot("_1_waiting")
+        h.page.get_by_role("button", name="Stop safely").click()
+        status = h.wait_run_finished(timeout=30)
+        check(status["phase"] == "cancelled", f"phase {status['phase']!r}: {status['message']!r}")
+    return body
+
+
 def _cancel_case(method):
     def body(h, shot):
         h.open_app(courses=[MOCK_COURSE], scenario="timeout")
@@ -1007,8 +1054,8 @@ for _prefix, _method in (("bs", "BeautifulSoup"), ("pw", "Playwright")):
          _run_case(_method, "success", "2103370", "complete", "All courses registered", "Confirmed")),
         ("02_register_fail", "register-fail", "Run ends with course marked Not registered",
          _run_case(_method, "register-fail", "2103370", "error", None, "Not registered")),
-        ("03_session_expired", "session-expired", "Run ends with a login error",
-         _run_case(_method, "session-expired", "2103370", "error", "Login")),
+        ("03_session_expired", "session-expired", "Keeps trying the login (nothing bid); Stop ends the run",
+         _login_wait_case(_method, "session-expired")),
         ("04_invalid_credentials", "invalid credentials", "Run ends with a credentials error",
          _run_case(_method, "success", "invalid", "error", "credentials")),
         ("05_timeout", "timeout", "Slow server: course marked Not registered",
