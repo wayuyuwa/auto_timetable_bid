@@ -24,7 +24,7 @@ from copy import deepcopy
 from datetime import datetime
 
 from ..models.course import Course
-from ..scrapers.errors import BrowserMissing, InvalidCredentials, LoginError, PortalClosed
+from ..scrapers.errors import BrowserMissing, InvalidCredentials, LoginError, PortalClosed, PortalUnavailable
 from ..scrapers.html_parser import sessions_clash
 from ..utils.logger import setup_logger
 
@@ -33,6 +33,10 @@ logger = setup_logger(__name__)
 SUCCESS_MESSAGE = "All courses registered successfully."
 ATTENTION_MESSAGE = "Registration finished with items needing attention."
 CANCELLED_MESSAGE = "Registration cancelled safely."
+
+
+class StillClosed(Exception):
+    """The portal accepted the login and then ended the session: registration is still closed."""
 
 
 class Cancelled(Exception):
@@ -519,16 +523,44 @@ class PlanRunner:
             return True  # a scraper without the check: never wait for something it cannot tell
         return bool(check(self._first_course_code()))
 
+    def _login_again(self):
+        """A new login before each look while registration is closed (the first version did this; reloading
+        the page alone never makes the Register button appear). The portal answering "closed" or not
+        answering is just "still closed"; wrong credentials and the like stop the run."""
+        student_id, password = self._credentials
+        scraper = self._scraper
+        progress = getattr(scraper, "on_login_progress", None)
+        scraper.on_login_progress = None  # keep the waiting message instead of "Logging in: attempt..."
+        try:
+            scraper.login(student_id, password)
+        except PortalClosed as error:
+            self._check_cancel()
+            raise StillClosed() from error
+        except PortalUnavailable as error:
+            self._check_cancel()
+            raise RuntimeError(f"logging in again failed: {error}") from error
+        except LoginError as error:
+            self._check_cancel()
+            raise RunError(str(error), "login", error.kind) from error
+        finally:
+            scraper.on_login_progress = progress
+
     def _wait_until_open(self):
-        """Wait, until Stop, for the portal to take bids. Only reads: nothing is bid while waiting,
-        and waiting does not use up retry attempts. A failed check is logged and tried again."""
+        """Wait, until Stop, for the portal to take bids. Nothing is bid while waiting and waiting does not
+        use up retry attempts. Each look after the first logs in again first. A failed check is tried again."""
         checks = 0
         logged = set()
         while True:
             round_started = time.time()
             self._check_cancel()
             try:
+                if checks:
+                    self._login_again()  # reloading a closed page never shows the form: log in again
                 is_open, problem = self._registration_open(), None
+            except RunError:
+                raise
+            except StillClosed:
+                is_open, problem = False, None
             except Exception as error:  # noqa: BLE001
                 self._check_cancel()
                 is_open, problem = False, str(error) or type(error).__name__

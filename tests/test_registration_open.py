@@ -122,6 +122,18 @@ class WaitTests(RunnerCase):
                 self.assertEqual(SERVER.processed_submits, 1)
                 self.assertEqual(status["attempt"], 1)
 
+    def test_each_look_after_the_first_logs_in_again(self):
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                SERVER.registration_open = False
+                runner, thread = self.start(method)
+                self.wait_checks(runner, 4, timeout=60)
+                logins = SERVER.hits["loginProSurvey.jsp"]
+                runner.cancel()
+                thread.join(timeout=30)
+                SERVER.hits["loginProSurvey.jsp"] = 0
+                self.assertGreaterEqual(logins, 4, f"{method}: {logins} login(s) for 4 looks")
+
     def test_stop_ends_the_wait(self):
         for method in self.METHODS:
             with self.subTest(method=method):
