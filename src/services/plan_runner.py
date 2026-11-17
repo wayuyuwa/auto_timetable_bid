@@ -199,6 +199,7 @@ class PlanRunner:
         # seconds after the start time while the portal looks closed/unreachable.
         self.login_grace_seconds = 180
         self.login_retry_seconds = 10
+        self.closed_login_retry_seconds = 5  # start-now run: login retry while the portal is closed
         # While registration is closed (the portal shows no registration form) look again every
         # open_check_seconds, until it opens or the user presses Stop. Reading only, never bids.
         self.open_check_seconds = 2
@@ -450,11 +451,27 @@ class PlanRunner:
         Logging in never submits a bid, so for a scheduled start we keep
         retrying the login every login_retry_seconds until
         login_grace_seconds after the start time. Wrong credentials stop at once.
+        A start-now run that finds the portal closed at login retries every
+        closed_login_retry_seconds until it gets in or Stop is pressed.
         """
         start_at = float(self.start_at) if self.start_at else None
         if not start_at or start_at <= time.time():
-            self._login(student_id, password)
-            return
+            tries = 0
+            while True:  # portal closed at login: keep trying until it lets us in, or Stop
+                tries += 1
+                try:
+                    self._login(student_id, password)
+                    return
+                except RunError as error:
+                    if error.kind != "portal_closed":
+                        raise
+                    retry_at = time.time() + self.closed_login_retry_seconds
+                    self.board.update(
+                        phase="scheduled", next_retry_at=retry_at,
+                        message=f"Login try {tries}: the portal accepted the login but registration looks closed. "
+                                f"Trying again in {self.closed_login_retry_seconds:g}s until it opens; nothing has "
+                                f"been bid. Press Stop to quit.")
+                    self._sleep_until(retry_at)
         when = datetime.fromtimestamp(start_at).strftime("%H:%M:%S")
         self.board.update(phase="scheduled", start_at=start_at,
                           message=f"Waiting for scheduled start at {when}. Logging in "

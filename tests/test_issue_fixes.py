@@ -40,15 +40,37 @@ class LoginTests(RunnerCase):
         self.assertEqual(status["login"]["attempt"], 1)
         self.assertEqual(status["login"]["max"], 5)
 
-    def test_closed_portal_gives_up_fast_with_reasons(self):
+    def test_closed_portal_at_login_waits_until_stop_or_open(self):
         SERVER.scenario = "closed"
-        started = time.time()
         runner = PlanRunner([plan("Plan A", course("MOCK1001", L=[1]))], board=StatusBoard())
-        runner.run("2103370", "pw")
+        runner.closed_login_retry_seconds = 0.5
+        thread = threading.Thread(target=runner.run, args=("2103370", "pw"), daemon=True)
+        thread.start()
+        deadline = time.time() + 30
+        while "Trying again" not in runner.board.snapshot()["message"] and time.time() < deadline:
+            time.sleep(0.05)
         status = runner.board.snapshot()
-        self.assertEqual(status["error_kind"], "portal_closed")
-        self.assertEqual(len(status["login"]["reasons"]), 2)
-        self.assertLess(time.time() - started, 15)
+        self.assertIn("nothing has been bid", status["message"])
+        self.assertTrue(status["running"])
+        SERVER.scenario = "success"  # registration opens
+        thread.join(timeout=60)
+        status = runner.board.snapshot()
+        self.assertEqual(status["phase"], "complete", status["message"])
+        self.assertIn("MOCK1001", SERVER.registered)
+
+    def test_stop_ends_the_login_wait(self):
+        SERVER.scenario = "closed"
+        runner = PlanRunner([plan("Plan A", course("MOCK1001", L=[1]))], board=StatusBoard())
+        runner.closed_login_retry_seconds = 0.5
+        thread = threading.Thread(target=runner.run, args=("2103370", "pw"), daemon=True)
+        thread.start()
+        deadline = time.time() + 30
+        while "Trying again" not in runner.board.snapshot()["message"] and time.time() < deadline:
+            time.sleep(0.05)
+        runner.cancel()
+        thread.join(timeout=30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(runner.board.snapshot()["phase"], "cancelled")
         self.assertEqual(SERVER.registered, {})
 
     def test_stopping_flag_while_running(self):
