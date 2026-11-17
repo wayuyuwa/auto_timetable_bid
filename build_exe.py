@@ -61,6 +61,7 @@ def build_executable():
     cmd.extend([
         f"--add-data={os.path.join(ocr_dir, 'common_old.onnx')}{sep}{ocr_dir}",  # captcha OCR model
         f"--add-data={os.path.join(ocr_dir, 'common_old_charset.json')}{sep}{ocr_dir}",
+        f"--add-data=config.ini{sep}.",  # default config, used if none sits next to the exe
         f"--add-data=resources{sep}resources",  # Include resources
         f"--add-data={os.path.join('web', 'dist')}{sep}{os.path.join('web', 'dist')}",  # Built Vue frontend only (not node_modules)
     ])

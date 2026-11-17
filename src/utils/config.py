@@ -38,7 +38,9 @@ def load_config() -> configparser.ConfigParser:
         # Executable directory (for packaged app)
         os.path.join(os.path.dirname(sys.executable), 'config.ini'),
         # Fallback to the traditional location
-        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.ini')
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.ini'),
+        # Copy bundled inside the exe, used when none sits next to it
+        os.path.join(getattr(sys, '_MEIPASS', ''), 'config.ini'),
     ]
     
     config_path = None
@@ -85,7 +87,7 @@ def create_default_config() -> configparser.ConfigParser:
     
     # Default Playwright Settings
     config['Playwright'] = {
-        'options': 'disable-gpu,no-sandbox,disable-dev-shm-usage',
+        'options': '--disable-gpu,--no-sandbox,--disable-dev-shm-usage',
         'wait_time_very_short': '0.5',
         'wait_time_short': '1',
         'wait_time_long': '3'
@@ -131,7 +133,8 @@ DEFAULT_HEADERS = {
 }
 
 # Playwright Settings
-PLAYWRIGHT_ARGS = config['Playwright']['options'].split(',')
+# Chromium reads an argument without "--" as a page to open, so add it when missing.
+PLAYWRIGHT_ARGS = [("--" + a.strip().lstrip("-")) for a in config['Playwright']['options'].split(',') if a.strip()]
 WAIT_TIME_VERY_SHORT = float(config['Playwright']['wait_time_very_short'])
 WAIT_TIME_SHORT = float(config['Playwright']['wait_time_short'])
 WAIT_TIME_LONG = float(config['Playwright']['wait_time_long'])
